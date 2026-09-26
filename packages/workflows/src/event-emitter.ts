@@ -11,6 +11,7 @@
  */
 import { EventEmitter } from 'events';
 import type { ArtifactType, EffortLevel, NodeSkipReason, SkipCause } from './schemas';
+import type { NodeProviderSource } from './node-model-resolution';
 import { createLogger } from '@archon/paths';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
@@ -80,7 +81,14 @@ interface WorkflowArtifactEvent {
   path?: string;
 }
 
-interface NodeStartedEvent {
+interface NodeRoutingTelemetry {
+  /** Exact author-facing selector; null means no selector was authored. */
+  model_ref?: string | null;
+  /** Origin of the provider decision, independent from the resolved provider name. */
+  provider_source?: NodeProviderSource;
+}
+
+interface NodeStartedEvent extends NodeRoutingTelemetry {
   type: 'node_started';
   runId: string;
   nodeId: string;
@@ -91,7 +99,7 @@ interface NodeStartedEvent {
   effort?: EffortLevel; // resolved AI effort (absent when unset or unsupported)
 }
 
-interface NodeCompletedEvent {
+interface NodeCompletedEvent extends NodeRoutingTelemetry {
   type: 'node_completed';
   runId: string;
   nodeId: string;
@@ -102,7 +110,7 @@ interface NodeCompletedEvent {
   numTurns?: number;
 }
 
-interface NodeFailedEvent {
+interface NodeFailedEvent extends NodeRoutingTelemetry {
   type: 'node_failed';
   runId: string;
   nodeId: string;

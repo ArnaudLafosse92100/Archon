@@ -33,6 +33,8 @@ export {
   isPortableSystemAlias,
   portableSystemAliasTier,
   PORTABLE_SYSTEM_ALIAS_TIERS,
+  ROUTING_LIFECYCLE_EVENT_TYPES,
+  ROUTING_TELEMETRY_FIELDS,
   TIER_NAMES,
   tierNameSchema,
   modelAliasPresetSchema,

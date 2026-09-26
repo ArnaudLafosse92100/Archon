@@ -3205,6 +3205,15 @@ export interface components {
       error?: string;
       reason?: components['schemas']['NodeSkipReason'];
       cause?: components['schemas']['SkipCause'];
+      model_ref?: string | null;
+      /** @enum {string} */
+      provider_source?:
+        | 'node'
+        | 'model_ref'
+        | 'workflow'
+        | 'assistant_config'
+        | 'default_assistant'
+        | 'unset';
       timestamp: number;
     };
     /** @enum {string} */

@@ -22,10 +22,32 @@ import {
 } from './model-validation';
 import builtInTierDefaults from './defaults/tier-defaults.json';
 import { EFFORT_LEVELS } from './schemas';
+import {
+  NODE_PROVIDER_SOURCES,
+  PROVIDER_SOURCE_BY_RESOLUTION_ORIGIN,
+  isNodeProviderSource,
+  providerSourceFromResolutionOrigin,
+  type ResolutionOrigin,
+} from './node-model-resolution';
 
 // The effort helpers read `effortControl` off the provider registry, so the
 // registry has to be populated the way a real entrypoint populates it.
 registerBuiltinProviders();
+
+test('provider-source telemetry exhaustively maps every resolution origin', () => {
+  const origins = Object.keys(PROVIDER_SOURCE_BY_RESOLUTION_ORIGIN) as ResolutionOrigin[];
+  expect(origins.map(providerSourceFromResolutionOrigin)).toEqual(NODE_PROVIDER_SOURCES);
+  expect(PROVIDER_SOURCE_BY_RESOLUTION_ORIGIN).toEqual({
+    node: 'node',
+    'model ref': 'model_ref',
+    workflow: 'workflow',
+    'assistant config': 'assistant_config',
+    'default assistant': 'default_assistant',
+    unset: 'unset',
+  });
+  expect(NODE_PROVIDER_SOURCES.every(isNodeProviderSource)).toBe(true);
+  expect(isNodeProviderSource('model ref')).toBe(false);
+});
 registerCommunityProviders();
 
 describe('TIER_NAMES constant', () => {

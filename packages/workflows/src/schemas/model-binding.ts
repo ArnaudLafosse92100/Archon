@@ -19,6 +19,14 @@ export const PORTABLE_SYSTEM_ALIAS_TIERS = {
   '@adjudicator': 'medium',
 } as const satisfies Readonly<Record<string, TierName>>;
 
+/** Stable observability vocabulary advertised by `archon version --json`. */
+export const ROUTING_TELEMETRY_FIELDS = ['model_ref', 'provider_source'] as const;
+export const ROUTING_LIFECYCLE_EVENT_TYPES = [
+  'node_started',
+  'node_completed',
+  'node_failed',
+] as const;
+
 export type PortableSystemAlias = keyof typeof PORTABLE_SYSTEM_ALIAS_TIERS;
 
 export function isPortableSystemAlias(value: string): value is PortableSystemAlias {

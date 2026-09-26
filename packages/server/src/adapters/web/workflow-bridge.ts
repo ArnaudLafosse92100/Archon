@@ -9,6 +9,10 @@ import {
   type SkipCause,
 } from '@archon/workflows/schemas/workflow-run';
 import type { WorkflowEventRow } from '@archon/core/db/workflow-events';
+import {
+  isNodeProviderSource,
+  type NodeProviderSource,
+} from '@archon/workflows/node-model-resolution';
 import { SSETransport } from './transport';
 import type { DagNodeSseEvent } from './workflow-event.schemas';
 
@@ -119,6 +123,8 @@ export function mapWorkflowEvent(event: WorkflowEmitterEvent): string | null {
           event.type === 'node_skipped' && event.reason !== 'prior_success'
             ? event.cause
             : undefined,
+        model_ref: event.type === 'node_skipped' ? undefined : event.model_ref,
+        provider_source: event.type === 'node_skipped' ? undefined : event.provider_source,
         timestamp: Date.now(),
       };
       return JSON.stringify(payload);
@@ -227,6 +233,16 @@ function dataStr(data: Record<string, unknown>, ...keys: string[]): string | und
     if (typeof v === 'string') return v;
   }
   return undefined;
+}
+
+function dataModelRef(data: Record<string, unknown>): string | null | undefined {
+  const value = data.model_ref;
+  return typeof value === 'string' || value === null ? value : undefined;
+}
+
+function dataProviderSource(data: Record<string, unknown>): NodeProviderSource | undefined {
+  const value = data.provider_source;
+  return isNodeProviderSource(value) ? value : undefined;
 }
 
 function dataSkipReason(data: Record<string, unknown>): NodeSkipReason | undefined {
@@ -361,6 +377,8 @@ export function mapWorkflowEventRow(row: WorkflowEventRow): string | null {
             ? dataSkipReason(data)
             : undefined,
       cause: row.event_type === 'node_skipped' ? dataSkipCause(data) : undefined,
+      model_ref: dataModelRef(data),
+      provider_source: dataProviderSource(data),
       timestamp,
     };
     return JSON.stringify(payload);

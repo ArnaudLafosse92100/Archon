@@ -4366,6 +4366,10 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
 
   it('persists the exact authored model ref and provider source on start and terminal only', async () => {
     const deps = createMockDeps();
+    const liveEvents: WorkflowEmitterEvent[] = [];
+    const unsubscribe = getWorkflowEventEmitter().subscribe(event => {
+      if (event.runId === 'semantic-route-telemetry') liveEvents.push(event);
+    });
     await executeDagWorkflow(
       dagOptions({
         deps,
@@ -4413,6 +4417,11 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
         provider_source: 'model_ref',
       });
     }
+    for (const type of ['node_started', 'node_completed'] as const) {
+      expect(
+        liveEvents.find(event => event.type === type && event.nodeId === 'architect')
+      ).toMatchObject({ model_ref: '@architect', provider_source: 'model_ref' });
+    }
     for (const [step, modelRef, providerSource] of [
       ['tier-worker', 'medium', 'model_ref'],
       ['literal-worker', 'literal-model-id', 'workflow'],
@@ -4425,6 +4434,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
         ).toMatchObject({ model_ref: modelRef, provider_source: providerSource });
       }
     }
+    unsubscribe();
   });
 
   it('binds a post-auth provider-resolution throw to the same AI attempt', async () => {
@@ -4432,6 +4442,10 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
       throw new Error('provider registry unavailable');
     });
     const deps = createMockDeps();
+    const liveEvents: WorkflowEmitterEvent[] = [];
+    const unsubscribe = getWorkflowEventEmitter().subscribe(event => {
+      if (event.runId === 'post-auth-provider-resolution') liveEvents.push(event);
+    });
     await executeDagWorkflow(
       dagOptions({
         deps,
@@ -4465,6 +4479,10 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
     ]);
     expect(new Set(lifecycle.map(event => event.data?.node_id)).size).toBe(1);
     expect(lifecycle[2]?.data?.error).toContain('provider registry unavailable');
+    expect(
+      liveEvents.find(event => event.type === 'node_failed' && event.nodeId === 'consumer')
+    ).toMatchObject({ model_ref: null, provider_source: 'workflow' });
+    unsubscribe();
   });
 
   it('rebuilds strict Codex launch isolation for the remaining node on resume', async () => {

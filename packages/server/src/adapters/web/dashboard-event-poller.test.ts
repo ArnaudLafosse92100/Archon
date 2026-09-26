@@ -75,6 +75,23 @@ describe('mapWorkflowEventRow', () => {
     });
   });
 
+  test('persisted AI lifecycle telemetry reaches dashboard SSE', () => {
+    const event = JSON.parse(
+      mapWorkflowEventRow(
+        row({
+          event_type: 'node_completed',
+          step_name: 'plan',
+          data: { model_ref: '@architect', provider_source: 'model_ref' },
+        })
+      ) ?? '{}'
+    ) as Record<string, unknown>;
+    expect(event).toMatchObject({
+      type: 'dag_node',
+      model_ref: '@architect',
+      provider_source: 'model_ref',
+    });
+  });
+
   test('node_failed carries the error field', () => {
     const e = JSON.parse(
       mapWorkflowEventRow(

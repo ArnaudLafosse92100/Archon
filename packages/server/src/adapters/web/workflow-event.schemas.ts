@@ -3,6 +3,7 @@ import {
   nodeSkipReasonSchema as engineNodeSkipReasonSchema,
   skipCauseSchema as engineSkipCauseSchema,
 } from '@archon/workflows/schemas/workflow-run';
+import { NODE_PROVIDER_SOURCES } from '@archon/workflows/node-model-resolution';
 
 export const skipCauseSchema = engineSkipCauseSchema.openapi('SkipCause');
 export const nodeSkipReasonSchema = engineNodeSkipReasonSchema.openapi('NodeSkipReason');
@@ -18,6 +19,8 @@ export const dagNodeSseEventSchema = z
     error: z.string().optional(),
     reason: nodeSkipReasonSchema.optional(),
     cause: skipCauseSchema.optional(),
+    model_ref: z.string().nullable().optional(),
+    provider_source: z.enum(NODE_PROVIDER_SOURCES).optional(),
     timestamp: z.number(),
   })
   .openapi('DagNodeSseEvent');

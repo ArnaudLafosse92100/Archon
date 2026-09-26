@@ -57,6 +57,43 @@ test('node skip projection preserves the live skip cause', () => {
   });
 });
 
+test('AI lifecycle projection preserves routing telemetry', () => {
+  for (const event of [
+    {
+      type: 'node_started',
+      runId: 'run-routing',
+      nodeId: 'plan',
+      nodeName: 'plan',
+      model_ref: '@architect',
+      provider_source: 'model_ref',
+    },
+    {
+      type: 'node_completed',
+      runId: 'run-routing',
+      nodeId: 'plan',
+      nodeName: 'plan',
+      duration: 42,
+      model_ref: '@architect',
+      provider_source: 'model_ref',
+    },
+    {
+      type: 'node_failed',
+      runId: 'run-routing',
+      nodeId: 'plan',
+      nodeName: 'plan',
+      error: 'boom',
+      model_ref: '@architect',
+      provider_source: 'model_ref',
+    },
+  ] satisfies WorkflowEmitterEvent[]) {
+    expect(JSON.parse(mapWorkflowEvent(event) ?? '{}')).toMatchObject({
+      type: 'dag_node',
+      model_ref: '@architect',
+      provider_source: 'model_ref',
+    });
+  }
+});
+
 test('timeout skip projection preserves the live timeout cause', () => {
   const event: WorkflowEmitterEvent = {
     type: 'node_skipped',

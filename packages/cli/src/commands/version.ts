@@ -19,7 +19,11 @@ import {
 } from '@archon/paths';
 import { getDatabaseType } from '@archon/core';
 import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '@archon/providers/types';
-import { PORTABLE_SYSTEM_ALIAS_TIERS } from '@archon/workflows/model-validation';
+import {
+  PORTABLE_SYSTEM_ALIAS_TIERS,
+  ROUTING_LIFECYCLE_EVENT_TYPES,
+  ROUTING_TELEMETRY_FIELDS,
+} from '@archon/workflows/model-validation';
 
 const log = createLogger('cli:version');
 
@@ -157,8 +161,8 @@ export async function versionCommand(json = false): Promise<void> {
           'workflow.portable_model_aliases': {
             version: 1,
             aliases: PORTABLE_SYSTEM_ALIAS_TIERS,
-            telemetryFields: ['model_ref', 'provider_source'],
-            lifecycleEvents: ['node_started', 'node_completed', 'node_failed'],
+            telemetryFields: ROUTING_TELEMETRY_FIELDS,
+            lifecycleEvents: ROUTING_LIFECYCLE_EVENT_TYPES,
           },
           'node_failed.data.error_class': NODE_FAILURE_CLASS_CONTRACT,
           'workflow.credential_policy.codex': CODEX_CREDENTIAL_POLICY_CONTRACT,

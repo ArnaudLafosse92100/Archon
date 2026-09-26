@@ -131,7 +131,11 @@ At run time Archon gives the governed adapter only the exact created or adopted 
 
 The `tiers:` block above is no longer hand-edit-only -- you can also set the `small`/`medium`/`large` presets from the console **AI Settings** -> **Model Tiers** panel, or from the CLI with [`archon ai tier set`](/reference/cli/#ai). Connecting your own provider API key or subscription is covered in [Per-user credentials and AI Settings](/getting-started/ai-assistants/#per-user-credentials-and-ai-settings).
 
+Four portable system aliases are always valid: `@implementer` → `medium`, `@architect` → `large`, `@reviewer` → `medium`, and `@adjudicator` → `medium`. They are virtual fallbacks, so changing a tier changes the corresponding system alias dynamically. An explicit alias entry with the same name takes precedence. Bundled and global workflows may rely on these four names; other `@name` aliases are project-specific.
+
 These files are persistent layers. For one invocation, use repeatable [`workflow run --model <name>=<spec>`](/reference/cli/#workflow-run-name-message), [`workflow run --config <path>`](/reference/cli/#per-run-config-files), or the run API's inline `config`, `tiers`, and `aliases` fields. Each run layer is sparse and sits above user, repository, global, and built-in values without editing a persistent config file.
+
+At run creation, Archon seals the effective non-secret model profile in run metadata. A resumed run reuses that profile even if user, repository, or global configuration changed while it was paused. AI lifecycle events expose the exact authored selector as `model_ref` and the provider decision origin as `provider_source` on `node_started`, `node_completed`, and `node_failed`, both in persisted event data and live SSE projection.
 
 ## Run-scoped configuration
 

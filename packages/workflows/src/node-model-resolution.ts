@@ -32,6 +32,29 @@ export type ResolutionOrigin =
   | 'default assistant'
   | 'unset';
 
+export const PROVIDER_SOURCE_BY_RESOLUTION_ORIGIN = {
+  node: 'node',
+  'model ref': 'model_ref',
+  workflow: 'workflow',
+  'assistant config': 'assistant_config',
+  'default assistant': 'default_assistant',
+  unset: 'unset',
+} as const satisfies Record<ResolutionOrigin, string>;
+
+export type NodeProviderSource = (typeof PROVIDER_SOURCE_BY_RESOLUTION_ORIGIN)[ResolutionOrigin];
+export const NODE_PROVIDER_SOURCES = Object.values(PROVIDER_SOURCE_BY_RESOLUTION_ORIGIN);
+
+export function providerSourceFromResolutionOrigin(origin: ResolutionOrigin): NodeProviderSource {
+  return PROVIDER_SOURCE_BY_RESOLUTION_ORIGIN[origin];
+}
+
+export function isNodeProviderSource(value: unknown): value is NodeProviderSource {
+  return (
+    typeof value === 'string' &&
+    NODE_PROVIDER_SOURCES.some(providerSource => providerSource === value)
+  );
+}
+
 export interface NodeModelResolution {
   provider: string;
   model: string | undefined;

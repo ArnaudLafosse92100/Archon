@@ -28,6 +28,8 @@ import {
   isPortableSystemAlias,
   portableSystemAliasTier,
   PORTABLE_SYSTEM_ALIAS_TIERS,
+  ROUTING_LIFECYCLE_EVENT_TYPES,
+  ROUTING_TELEMETRY_FIELDS,
   runModelBindingsMetadataSchema,
   TIER_NAMES,
   type ModelAliasPreset,
@@ -40,7 +42,13 @@ import {
   type TierName,
 } from './schemas/model-binding';
 
-export { isPortableSystemAlias, PORTABLE_SYSTEM_ALIAS_TIERS, TIER_NAMES };
+export {
+  isPortableSystemAlias,
+  PORTABLE_SYSTEM_ALIAS_TIERS,
+  ROUTING_LIFECYCLE_EVENT_TYPES,
+  ROUTING_TELEMETRY_FIELDS,
+  TIER_NAMES,
+};
 export type {
   ModelAliasPreset,
   RawAliasEntry,

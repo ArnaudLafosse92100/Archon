@@ -137,7 +137,10 @@ import {
 } from './compiled-command';
 import {
   assistantModelDefaults,
+  isNodeProviderSource,
+  providerSourceFromResolutionOrigin,
   resolveNodeModel,
+  type NodeProviderSource,
   type ResolutionOrigin,
 } from './node-model-resolution';
 import {
@@ -163,7 +166,6 @@ import {
   lifecycleEventData,
   type NodeAuthContextV1,
   type NodeLifecycleIdentityV1,
-  type NodeProviderSource,
 } from './node-auth-context';
 import {
   classifyError,
@@ -2016,7 +2018,7 @@ async function resolveNodeProviderAndModel(
     provider,
     model,
     modelRef: resolution.modelRef,
-    providerSource: resolution.providerOrigin.replace(' ', '_') as NodeProviderSource,
+    providerSource: providerSourceFromResolutionOrigin(resolution.providerOrigin),
     options,
     tier: resolution.tier,
     effort: resolvedEffort,
@@ -2281,6 +2283,7 @@ async function executeNodeInternal(
     model: resolvedModel,
     tier: resolvedTier,
     ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
+    ...routingTelemetryEventData(resolvedModelRef, resolvedProviderSource),
   });
 
   let nodeTokens: TokenUsage | undefined;
@@ -2330,6 +2333,7 @@ async function executeNodeInternal(
       nodeId: node.id,
       nodeName: commandName ?? node.id,
       error,
+      ...routingTelemetryEventData(resolvedModelRef, resolvedProviderSource),
     });
 
     lastNodeCancelCheck.delete(nodeKey);
@@ -3380,6 +3384,7 @@ async function executeNodeInternal(
       ...(nodeCostUsd !== undefined ? { costUsd: nodeCostUsd } : {}),
       ...(nodeStopReason ? { stopReason: nodeStopReason } : {}),
       ...(nodeNumTurns !== undefined ? { numTurns: nodeNumTurns } : {}),
+      ...routingTelemetryEventData(resolvedModelRef, resolvedProviderSource),
     });
 
     // Clean up throttle entries on completion
@@ -6109,6 +6114,7 @@ async function executeLoopNode(
     model: resolvedModel,
     tier: resolvedTier,
     ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
+    ...routingTelemetryEventData(resolvedModelRef, resolvedProviderSource),
   });
 
   /**
@@ -6162,6 +6168,7 @@ async function executeLoopNode(
       nodeId: node.id,
       nodeName: node.id,
       error,
+      ...routingTelemetryEventData(resolvedModelRef, resolvedProviderSource),
     });
     return {
       state: 'failed',
@@ -7504,6 +7511,7 @@ async function executeLoopNode(
         ...(loopTotalCostUsd !== undefined ? { costUsd: loopTotalCostUsd } : {}),
         ...(loopFinalStopReason ? { stopReason: loopFinalStopReason } : {}),
         ...(loopTotalNumTurns !== undefined ? { numTurns: loopTotalNumTurns } : {}),
+        ...routingTelemetryEventData(resolvedModelRef, resolvedProviderSource),
       });
       // Declared field set, so a downstream `$loop.output.field` gets the same
       // strict contract every other producer enforces: a field not in the schema
@@ -10237,8 +10245,25 @@ function authBindingEventData(
     context_id: context.context_id,
     context_sha256: context.context_sha256,
     billing: context.billing.class,
-    model_ref: modelRef ?? null,
-    provider_source: providerSource,
+    ...routingTelemetryEventData(modelRef, providerSource),
+  };
+}
+
+function routingTelemetryEventData(
+  modelRef: string | undefined,
+  providerSource: NodeProviderSource
+): { model_ref: string | null; provider_source: NodeProviderSource } {
+  return { model_ref: modelRef ?? null, provider_source: providerSource };
+}
+
+function routingTelemetryFromLifecycleData(
+  data: Record<string, unknown> | undefined
+): Partial<ReturnType<typeof routingTelemetryEventData>> {
+  const modelRef = data?.model_ref;
+  const providerSource = data?.provider_source;
+  return {
+    ...(typeof modelRef === 'string' || modelRef === null ? { model_ref: modelRef } : {}),
+    ...(isNodeProviderSource(providerSource) ? { provider_source: providerSource } : {}),
   };
 }
 
@@ -11394,6 +11419,7 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
                 nodeId: node.id,
                 nodeName: nodeDisplayName(node),
                 error: err.message,
+                ...routingTelemetryFromLifecycleData(activeAttempt?.data),
               });
             }
             await safeSendMessage(
