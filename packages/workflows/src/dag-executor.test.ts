@@ -23063,9 +23063,9 @@ describe('executeDagWorkflow -- loop_group node', () => {
     expect(result).toContain('final');
   });
 
-  it('EDGE E: between-iteration cancellation stops the loop with a failed result', async () => {
-    // getWorkflowRunStatus returns 'running' on iteration 1, then 'cancelled' before
-    // iteration 2 → the between-iteration check halts the loop with a failed result.
+  it('EDGE E: post-body cancellation writes one identity-bound group failure', async () => {
+    // getWorkflowRunStatus returns 'running' before iteration 1, then 'cancelled' after
+    // its body → the post-body status check halts the loop with a failed result.
     let calls = 0;
     const statuses = ['running', 'cancelled', 'cancelled'];
     // Override the store mock to cycle statuses. createMockDeps uses createMockStore which
@@ -23120,6 +23120,79 @@ describe('executeDagWorkflow -- loop_group node', () => {
     // (no DONE) → outer DAG sees no terminal output.
     expect(calls).toBe(1);
     expect(result).toBeUndefined();
+    const groupFailures = persistedEvents(mockDeps.store).filter(
+      event => event.event_type === 'node_failed' && event.step_name === 'cancellable'
+    );
+    expect(groupFailures).toHaveLength(1);
+    expect(groupFailures[0]?.data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'cancellable',
+      ai_node: false,
+      error: 'Workflow cancelled',
+    });
+    expect(
+      persistedEvents(mockDeps.store).some(
+        event => event.event_type === 'node_started' && event.step_name === 'cancellable'
+      )
+    ).toBe(false);
+  });
+
+  it('EDGE E: pre-body cancellation writes one identity-bound group failure', async () => {
+    const mockDeps = createMockDeps();
+    mockDeps.store.getWorkflowRunStatus = mock(async () => 'cancelled' as const);
+    mockSendQueryDag.mockImplementation(async function* () {
+      throw new Error('body must not run');
+    });
+
+    await executeDagWorkflow(
+      dagOptions({
+        deps: mockDeps,
+        platform: createMockPlatform(),
+        conversationId: 'conv-lg-pre-cancel',
+        cwd: testDir,
+        workflow: {
+          name: 'lg-pre-cancel',
+          nodes: [
+            {
+              id: 'cancellable',
+              kind: 'loop_group',
+              loop_group: {
+                until: 'DONE',
+                max_iterations: 2,
+                fresh_context: false,
+                nodes: [
+                  {
+                    id: 'work',
+                    kind: 'agent',
+                    source: { kind: 'inline', prompt: 'must not run' },
+                    depends_on: [],
+                  },
+                ],
+              },
+              depends_on: [],
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('lg-pre-cancel'),
+      })
+    );
+
+    expect(mockSendQueryDag).not.toHaveBeenCalled();
+    const groupFailures = persistedEvents(mockDeps.store).filter(
+      event => event.event_type === 'node_failed' && event.step_name === 'cancellable'
+    );
+    expect(groupFailures).toHaveLength(1);
+    expect(groupFailures[0]?.data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'cancellable',
+      ai_node: false,
+      error: 'Workflow cancelled',
+    });
+    expect(
+      persistedEvents(mockDeps.store).some(
+        event => event.event_type === 'node_started' && event.step_name === 'cancellable'
+      )
+    ).toBe(false);
   });
 
   it('EDGE G: until signal OR until_bash — signal short-circuits until_bash (not executed)', async () => {
@@ -23632,6 +23705,72 @@ describe('executeDagWorkflow -- loop_group node', () => {
     );
     expect(completed.length).toBe(1);
     expect(completed[0][0].data.node_output).toBe('GROUP REPORT');
+    expect(completed[0][0].data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'refine',
+      ai_node: false,
+    });
+  });
+
+  it('INTERACTIVE: a loop_group gate delivery failure writes one identity-bound terminal', async () => {
+    const store = createMockStore();
+    const platform = createMockPlatform();
+    platform.sendMessage.mockImplementation(async (_conversationId, message) => {
+      if (message.includes('Input required')) throw new Error('temporary delivery failure');
+    });
+
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(store),
+        platform,
+        conversationId: 'conv-lg-gate-failure',
+        cwd: testDir,
+        workflow: {
+          name: 'lg-gate-failure',
+          nodes: [
+            {
+              id: 'refine',
+              kind: 'loop_group',
+              loop_group: {
+                until: 'APPROVED',
+                max_iterations: 2,
+                fresh_context: false,
+                interactive: true,
+                gate_message: 'Review the result.',
+                nodes: [
+                  {
+                    id: 'work',
+                    kind: 'exec',
+                    runtime: 'sh',
+                    script: "printf 'needs review'",
+                    depends_on: [],
+                  },
+                ],
+              },
+              depends_on: [],
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('lg-gate-failure'),
+      })
+    );
+
+    const groupFailures = persistedEvents(store).filter(
+      event => event.event_type === 'node_failed' && event.step_name === 'refine'
+    );
+    expect(groupFailures).toHaveLength(1);
+    expect(groupFailures[0]?.data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'refine',
+      ai_node: false,
+      iteration: 1,
+      error: "Loop-group gate message failed to deliver for node 'refine' — cannot pause safely",
+    });
+    expect(
+      persistedEvents(store).some(
+        event => event.event_type === 'node_started' && event.step_name === 'refine'
+      )
+    ).toBe(false);
   });
 
   it('INTERACTIVE: gate-finalize keeps the terminal sink payload, so both completion routes share one field-access tier (#2637)', async () => {
@@ -24870,6 +25009,21 @@ describe('executeDagWorkflow -- loop_group node', () => {
     expect(iter2Started?.data?.iteration).toBe(2);
     expect(iter2Failed?.data?.iteration).toBe(2);
     expect(iter2Failed?.data?.error).toContain('Simulated provider failure');
+
+    const groupFailures = events.filter(
+      e => e.event_type === 'node_failed' && e.step_name === 'fixer'
+    );
+    expect(groupFailures).toHaveLength(1);
+    expect(groupFailures[0]?.data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'fixer',
+      ai_node: false,
+      iteration: 2,
+      error: expect.stringContaining('Simulated provider failure'),
+    });
+    expect(events.some(e => e.event_type === 'node_started' && e.step_name === 'fixer')).toBe(
+      false
+    );
   });
 
   it('does not record iteration on node_failed for a non-loop agent (#3080)', async () => {
@@ -30690,9 +30844,10 @@ describe('value transport (#2637): persistence, resume, and node-local bindings'
     ];
 
     const platform = createMockPlatform();
+    const store = createMockStore();
     await executeDagWorkflow(
       dagOptions({
-        deps: createMockDeps(),
+        deps: createMockDeps(store),
         platform,
         conversationId: 'conv-lg-binding',
         cwd: testDir,
@@ -30710,6 +30865,23 @@ describe('value transport (#2637): persistence, resume, and node-local bindings'
       .join('\n');
     expect(sent).toContain("Node 'gate-ready'");
     expect(sent).toContain("'corrections' failed");
+
+    const groupFailures = persistedEvents(store).filter(
+      event => event.event_type === 'node_failed' && event.step_name === 'corrections'
+    );
+    expect(groupFailures).toHaveLength(1);
+    expect(groupFailures[0]?.data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'corrections',
+      ai_node: false,
+      max_iterations: 1,
+      error: expect.stringContaining('exceeded max iterations'),
+    });
+    expect(
+      persistedEvents(store).some(
+        event => event.event_type === 'node_started' && event.step_name === 'corrections'
+      )
+    ).toBe(false);
   });
 
   // --- sibling gaps to the #2710 binding-directive fix (#2713) ---

@@ -4738,9 +4738,9 @@ async function finalizeLoopFromSignal(
   stepName: string,
   nodeLabel: string,
   finalizeOutput: string,
-  finalizeUsage?: { costUsd?: number; tokens?: TokenUsage },
-  finalizeStructuredOutput?: unknown,
-  lifecycleData?: Record<string, unknown>
+  finalizeUsage: { costUsd?: number; tokens?: TokenUsage } | undefined,
+  finalizeStructuredOutput: unknown,
+  lifecycleData: Record<string, unknown>
 ): Promise<void> {
   // Impossible by construction today (the gate writes signaledOutput whenever
   // completionSignaled is true) — this warn guards a future decoupling so a
@@ -4763,7 +4763,7 @@ async function finalizeLoopFromSignal(
       event_type: 'node_completed',
       step_name: stepName,
       data: {
-        ...(lifecycleData ?? {}),
+        ...lifecycleData,
         duration_ms: 0,
         node_output: finalizeOutput,
         ...(finalizeStructuredOutput !== undefined
@@ -4865,6 +4865,53 @@ async function executeLoopGroupNode(
   // loop_groups compose (e.g. `outer.inner`); '' → node.id at the top level (#2090).
   const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
   const stepName = stepNamePrefix + node.id;
+  registerLifecycleAttempt(ctx, stepName, lifecycleData);
+
+  const failLoopGroupNode = async (
+    error: string,
+    extras: {
+      output?: string;
+      costUsd?: number;
+      tokens?: TokenUsage;
+      loopIterations?: number;
+      data?: Record<string, unknown>;
+    } = {}
+  ): Promise<NodeExecutionResult> => {
+    markLifecycleTerminal(ctx, stepName);
+    await deps.store
+      .createWorkflowEvent({
+        workflow_run_id: workflowRun.id,
+        event_type: 'node_failed',
+        step_name: stepName,
+        data: nodeFailureData(error, {
+          ...lifecycleData,
+          aggregate: true,
+          ...(extras.costUsd !== undefined ? { cost_usd: extras.costUsd } : {}),
+          ...(extras.data ?? {}),
+        }),
+      })
+      .catch((err: Error) => {
+        getLog().error(
+          { err, workflowRunId: workflowRun.id, eventType: 'node_failed' },
+          'workflow_event_persist_failed'
+        );
+      });
+    getWorkflowEventEmitter().emit({
+      type: 'node_failed',
+      runId: workflowRun.id,
+      nodeId: node.id,
+      nodeName: node.id,
+      error,
+    });
+    return {
+      state: 'failed',
+      output: extras.output ?? '',
+      error,
+      ...(extras.costUsd !== undefined ? { costUsd: extras.costUsd } : {}),
+      ...(extras.tokens !== undefined ? { tokens: extras.tokens } : {}),
+      ...(extras.loopIterations !== undefined ? { loopIterations: extras.loopIterations } : {}),
+    };
+  };
 
   // Body layering is recomputed per iteration from the (possibly $LOOP_PREV-substituted)
   // body nodes — runLayers walks ctx.layers, so the layers must reference the substituted
@@ -4949,8 +4996,10 @@ async function executeLoopGroupNode(
       // DOES pass it — its per-iteration rows carry no usage, so its finalize row is
       // the only record.
       undefined,
-      finalizeStructured ?? undefined
+      finalizeStructured ?? undefined,
+      lifecycleData
     );
+    markLifecycleTerminal(ctx, stepName);
     return {
       state: 'completed',
       output: finalizeOutput,
@@ -5144,6 +5193,7 @@ async function executeLoopGroupNode(
           `Loop-group node '${node.id}' completed after ${String(resumedIteration)} iteration${resumedIteration > 1 ? 's' : ''}`,
           msgContext
         );
+        markLifecycleTerminal(ctx, stepName);
         deps.store
           .createWorkflowEvent({
             workflow_run_id: workflowRun.id,
@@ -5235,7 +5285,7 @@ async function executeLoopGroupNode(
         `Loop-group node '${node.id}' stopped at iteration ${String(i)} (${effectiveStatus})`,
         msgContext
       );
-      return { state: 'failed', output: '', error: `Workflow ${effectiveStatus}` };
+      return await failLoopGroupNode(`Workflow ${effectiveStatus}`);
     }
 
     // Emit iteration started.
@@ -5365,7 +5415,9 @@ async function executeLoopGroupNode(
         { workflowRunId: workflowRun.id, nodeId: node.id, iteration: i, status: effectiveStatus },
         'loop_group_node.post_body_stop'
       );
-      return { state: 'failed', output: lastIterationOutput, error: `Workflow ${effectiveStatus}` };
+      return await failLoopGroupNode(`Workflow ${effectiveStatus}`, {
+        output: lastIterationOutput,
+      });
     }
     // Accumulate usage across iterations (charged on the failure path below too).
     loopTotalCostUsd = (loopTotalCostUsd ?? 0) + iterCtx.totalCostUsd;
@@ -5464,14 +5516,13 @@ async function executeLoopGroupNode(
         'loop_group_node.body_node_failed'
       );
       await safeSendMessage(platform, conversationId, errorMsg, msgContext);
-      return {
-        state: 'failed',
+      return await failLoopGroupNode(errorMsg, {
         output: lastIterationOutput,
-        error: errorMsg,
         costUsd: loopTotalCostUsd,
         ...(loopTotalTokens !== undefined ? { tokens: loopTotalTokens } : {}),
         loopIterations: i,
-      };
+        data: { iteration: i, failed_body_nodes: failedBodyNodes },
+      });
     }
 
     // Carry the body's final sequential session into the next iteration (unless
@@ -5662,6 +5713,7 @@ async function executeLoopGroupNode(
         `Loop-group node '${node.id}' completed after ${String(i)} iteration${i > 1 ? 's' : ''}`,
         msgContext
       );
+      markLifecycleTerminal(ctx, stepName);
       deps.store
         .createWorkflowEvent({
           workflow_run_id: workflowRun.id,
@@ -5751,11 +5803,14 @@ async function executeLoopGroupNode(
           { nodeId: node.id, workflowRunId: workflowRun.id, iteration: i },
           'loop_group_node.gate_message_send_failed'
         );
-        return {
-          state: 'failed',
+        const error = `Loop-group gate message failed to deliver for node '${node.id}' — cannot pause safely`;
+        return await failLoopGroupNode(error, {
           output: lastIterationOutput,
-          error: `Loop-group gate message failed to deliver for node '${node.id}' — cannot pause safely`,
-        };
+          costUsd: loopTotalCostUsd,
+          ...(loopTotalTokens !== undefined ? { tokens: loopTotalTokens } : {}),
+          loopIterations: i,
+          data: { iteration: i },
+        });
       }
       deps.store
         .createWorkflowEvent({
@@ -5807,14 +5862,13 @@ async function executeLoopGroupNode(
     'loop_group_node.max_iterations_reached'
   );
   await safeSendMessage(platform, conversationId, errorMsg, msgContext);
-  return {
-    state: 'failed',
+  return await failLoopGroupNode(errorMsg, {
     output: lastIterationOutput,
-    error: errorMsg,
     costUsd: loopTotalCostUsd,
     ...(loopTotalTokens !== undefined ? { tokens: loopTotalTokens } : {}),
     loopIterations: iterationLimit,
-  };
+    data: { max_iterations: iterationLimit },
+  });
 }
 
 /**
@@ -10093,8 +10147,8 @@ interface RunLayersContext extends RunInputs, RunDerived {
    * (top-level exec nodes have no loop user input).
    */
   bodyLoopUserInput?: string;
-  /** Latest started lifecycle attempt for each fully-qualified step name. Shared by nested
-   * contexts so the dispatcher can bind an otherwise-unhandled post-start throw to the
+  /** Latest allocated lifecycle attempt for each fully-qualified step name. Shared by nested
+   * contexts so the dispatcher can bind an otherwise-unhandled post-allocation throw to the
    * exact AI or deterministic attempt, and can refuse a contradictory second terminal. */
   activeLifecycleAttempts: Map<string, { data: Record<string, unknown>; terminalWritten: boolean }>;
 }
