@@ -7,6 +7,7 @@ import { describe, it, expect, mock, beforeEach, spyOn } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'path';
+import { randomUUID } from 'node:crypto';
 
 // --- Mock logger ---
 const mockLogFn = mock(() => {});
@@ -1781,9 +1782,12 @@ describe('executeWorkflow', () => {
         })),
         isPerUserProviderKeysEnabled: () => true,
         getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
           env: { PROTECTED_TOKEN: 'credential-wins' },
           files: [],
           protectedValues: ['credential-wins'],
+          credentials: [],
+          issues: [],
         })),
       };
 
@@ -2818,11 +2822,248 @@ describe('executeWorkflow', () => {
   // -------------------------------------------------------------------------
 
   describe('user provider env injection', () => {
+    const credentialPolicy = {
+      layer: {
+        credentialPolicy: { providers: { codex: { requiredKind: 'subscription' as const } } },
+      },
+      source: { kind: 'cli' as const, label: 'credential-policy.yaml' },
+    };
+    const policyMetadata: WorkflowRunConfigMetadata = {
+      version: 1,
+      ciphertext: 'opaque-policy',
+      source: credentialPolicy.source,
+      keys: ['credentialPolicy.providers.codex.requiredKind'],
+    };
+
+    it('fails before DAG when strict Codex policy resolves an API key', async () => {
+      const secret = 'must-not-leak';
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        sealRunConfig: () => policyMetadata,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
+          env: { OPENAI_API_KEY: secret },
+          files: [],
+          protectedValues: [secret],
+          credentials: [
+            { vendor: 'openai', kind: 'api_key' as const, delivery: 'environment' as const },
+          ],
+          issues: [],
+        })),
+      };
+
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/private/worktree',
+        makeWorkflow(),
+        'msg',
+        'db-c1',
+        { userId: 'u-1', runConfig: credentialPolicy }
+      );
+
+      expect(result).toMatchObject({ success: false, error: 'credential_policy_kind_mismatch' });
+      expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(JSON.stringify(result)).not.toContain('/private/worktree');
+    });
+
+    it('fails before DAG when strict Codex policy has no usable credential', async () => {
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        sealRunConfig: () => policyMetadata,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
+          env: {},
+          files: [],
+          protectedValues: [],
+          credentials: [],
+          issues: [{ vendor: 'openai', code: 'credential_unusable' as const }],
+        })),
+      };
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow(),
+        'msg',
+        'db-c1',
+        { userId: 'u-1', runConfig: credentialPolicy }
+      );
+      expect(result).toMatchObject({
+        success: false,
+        error: 'credential_policy_credential_unusable',
+      });
+      expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('fails with the stable resolution code when strict provenance cannot be resolved', async () => {
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        sealRunConfig: () => policyMetadata,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
+          env: {},
+          files: [],
+          protectedValues: [],
+          credentials: [],
+          issues: [{ code: 'resolution_failed' as const }],
+        })),
+      };
+
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow(),
+        'msg',
+        'db-c1',
+        { userId: 'u-1', runConfig: credentialPolicy }
+      );
+
+      expect(result).toMatchObject({
+        success: false,
+        error: 'credential_policy_resolution_failed',
+      });
+      expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('rejects a managed-file claim without the run-scoped Codex auth file', async () => {
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        sealRunConfig: () => policyMetadata,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
+          env: { CODEX_HOME: '/unmanaged/codex-home' },
+          files: [],
+          protectedValues: [],
+          credentials: [
+            { vendor: 'openai', kind: 'subscription' as const, delivery: 'managed_file' as const },
+          ],
+          issues: [],
+        })),
+      };
+
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow(),
+        'msg',
+        'db-c1',
+        { userId: 'u-1', runConfig: credentialPolicy }
+      );
+
+      expect(result).toMatchObject({
+        success: false,
+        error: 'credential_policy_delivery_mismatch',
+      });
+      expect(JSON.stringify(result)).not.toContain('/unmanaged/codex-home');
+      expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('restores strict Codex policy on resume and accepts managed subscription delivery', async () => {
+      const getUserProviderEnv = mock(async (_userId: string, artifactsDir: string) => {
+        const expectedAuthPath = join(artifactsDir, 'codex-home', 'auth.json');
+        return {
+          status: 'resolved' as const,
+          env: { CODEX_HOME: join(artifactsDir, 'codex-home') },
+          files: [{ path: expectedAuthPath, contents: 'managed-oauth-material' }],
+          protectedValues: ['managed-oauth-material'],
+          credentials: [
+            { vendor: 'openai', kind: 'subscription' as const, delivery: 'managed_file' as const },
+          ],
+          issues: [],
+        };
+      });
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        unsealRunConfig: () => credentialPolicy.layer,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv,
+      };
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow(),
+        'msg',
+        'db-c1',
+        { preCreatedRun: makeRun({ metadata: { run_config: policyMetadata }, user_id: 'u-1' }) }
+      );
+      const artifactsDir = getUserProviderEnv.mock.calls[0]?.[1];
+      expect(result.success).toBe(true);
+      expect(artifactsDir).toBeDefined();
+      expect(await readFile(join(artifactsDir!, 'codex-home', 'auth.json'), 'utf8')).toBe(
+        'managed-oauth-material'
+      );
+      expect(mockExecuteDagWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails before DAG when strict managed credential file cannot be written', async () => {
+      const parentFile = join(tmpdir(), `archon-policy-parent-${randomUUID()}`);
+      await writeFile(parentFile, 'occupied');
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        sealRunConfig: () => policyMetadata,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv: mock(async (_userId: string, artifactsDir: string) => ({
+          status: 'resolved' as const,
+          env: { CODEX_HOME: join(artifactsDir, 'codex-home') },
+          files: [
+            {
+              path: join(artifactsDir, 'codex-home', 'auth.json'),
+              contents: 'secret-oauth-material',
+            },
+            { path: join(parentFile, 'blocked'), contents: 'secret-oauth-material' },
+          ],
+          protectedValues: ['secret-oauth-material'],
+          credentials: [
+            { vendor: 'openai', kind: 'subscription' as const, delivery: 'managed_file' as const },
+          ],
+          issues: [],
+        })),
+      };
+      try {
+        const result = await executeWorkflow(
+          deps,
+          makePlatform(),
+          'conv-1',
+          '/tmp',
+          makeWorkflow(),
+          'msg',
+          'db-c1',
+          { userId: 'u-1', runConfig: credentialPolicy }
+        );
+        expect(result).toMatchObject({
+          success: false,
+          error: 'credential_policy_file_write_failed',
+        });
+        expect(JSON.stringify(result)).not.toContain('secret-oauth-material');
+        expect(JSON.stringify(result)).not.toContain(parentFile);
+        expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+      } finally {
+        await rm(parentFile, { force: true });
+      }
+    });
+
     it('skips injection when isPerUserProviderKeysEnabled returns false', async () => {
       const getUserProviderEnv = mock(async () => ({
+        status: 'resolved' as const,
         env: { SHOULD_NOT_APPEAR: '1' },
         files: [],
         protectedValues: ['1'],
+        credentials: [],
+        issues: [],
       }));
       const deps: WorkflowDeps = {
         ...makeDeps(makeStore()),
@@ -2844,9 +3085,12 @@ describe('executeWorkflow', () => {
 
     it('skips injection when userId is absent even if feature is enabled', async () => {
       const getUserProviderEnv = mock(async () => ({
+        status: 'resolved' as const,
         env: { SHOULD_NOT_APPEAR: '1' },
         files: [],
         protectedValues: ['1'],
+        credentials: [],
+        issues: [],
       }));
       const deps: WorkflowDeps = {
         ...makeDeps(makeStore()),
@@ -2875,9 +3119,12 @@ describe('executeWorkflow', () => {
         })),
       });
       const getUserProviderEnv = mock(async () => ({
+        status: 'resolved' as const,
         env: { SHARED_KEY: 'user_wins', USER_KEY: 'u_val' },
         files: [] as { path: string; contents: string }[],
         protectedValues: ['user_wins', 'u_val'],
+        credentials: [],
+        issues: [],
       }));
       const deps: WorkflowDeps = {
         ...makeDeps(store),
@@ -2927,9 +3174,12 @@ describe('executeWorkflow', () => {
         getUserGithubToken: mock(async () => 'user-token'),
         isPerUserProviderKeysEnabled: () => true,
         getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
           env: { ANTHROPIC_API_KEY: 'provider-token' },
           files: [],
           protectedValues: ['provider-token'],
+          credentials: [],
+          issues: [],
         })),
       };
 
@@ -2998,12 +3248,15 @@ describe('executeWorkflow', () => {
         ...makeDeps(makeStore()),
         isPerUserProviderKeysEnabled: () => true,
         getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
           env: { CODEX_HOME: deliveryRoot },
           files: [
             { path: firstFile, contents: credentialValue },
             { path: impossibleSecondFile, contents: credentialValue },
           ],
           protectedValues: [credentialValue],
+          credentials: [],
+          issues: [],
         })),
       };
 
@@ -3025,9 +3278,12 @@ describe('executeWorkflow', () => {
 
     it('uses the persisted user identity to rebuild credential provenance on resume', async () => {
       const getUserProviderEnv = mock(async () => ({
+        status: 'resolved' as const,
         env: { CODEX_HOME: '/run/codex-home' },
         files: [],
         protectedValues: ['persisted-user-token'],
+        credentials: [],
+        issues: [],
       }));
       const deps: WorkflowDeps = {
         ...makeDeps(makeStore()),

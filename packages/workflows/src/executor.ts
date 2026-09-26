@@ -5,7 +5,7 @@ import { mkdir, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { dirname, join } from 'path';
-import { MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS } from './deps';
+import { CODEX_AUTH_JSON_RELATIVE_PATH, MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS } from './deps';
 import type { IWorkflowPlatform, WorkflowMessageMetadata } from './deps';
 import type { WorkflowDeps } from './deps';
 import * as archonPaths from '@archon/paths';
@@ -281,6 +281,33 @@ async function clearManagedProviderCredentialFiles(artifactsDir: string): Promis
   }
 }
 
+const credentialPolicyErrorCodes = {
+  providerKeysDisabled: 'credential_policy_provider_keys_disabled',
+  userRequired: 'credential_policy_user_required',
+  resolverUnavailable: 'credential_policy_resolver_unavailable',
+  resolutionFailed: 'credential_policy_resolution_failed',
+  credentialUnusable: 'credential_policy_credential_unusable',
+  credentialMissing: 'credential_policy_credential_missing',
+  kindMismatch: 'credential_policy_kind_mismatch',
+  deliveryMismatch: 'credential_policy_delivery_mismatch',
+  deliveryFailed: 'credential_policy_delivery_failed',
+  fileWriteFailed: 'credential_policy_file_write_failed',
+} as const;
+
+type CredentialPolicyErrorCode =
+  (typeof credentialPolicyErrorCodes)[keyof typeof credentialPolicyErrorCodes];
+
+class CredentialPolicyError extends Error {
+  constructor(readonly code: CredentialPolicyErrorCode) {
+    super(code);
+    this.name = 'CredentialPolicyError';
+  }
+}
+
+function failCredentialPolicy(code: CredentialPolicyErrorCode): never {
+  throw new CredentialPolicyError(code);
+}
+
 /**
  * Resolve per-user AI-provider credential env (Phase 2) for a run, and write
  * any file-based deliveries (e.g. Codex `CODEX_HOME/auth.json`) under the
@@ -290,18 +317,25 @@ async function clearManagedProviderCredentialFiles(artifactsDir: string): Promis
  * bags when per-user provider keys are disabled, no userId is present, or the
  * deps adapter is absent.
  *
- * Contract: NEVER THROWS. Adapter failures are logged and yield empty bags so the
- * workflow continues with whatever env inheritance was already in place. File
- * write failures also drop the resolved env, but retain the credential values:
- * an earlier file may already contain them and still needs failure-path redaction.
+ * Without a credential policy, adapter failures yield empty bags so existing
+ * runs continue with ambient env inheritance. With a strict Codex subscription
+ * policy, missing or mismatched provenance and delivery failures throw stable,
+ * non-secret policy codes before the DAG starts. File write failures otherwise
+ * drop the resolved env but retain values needed for failure-path redaction.
  */
 async function resolveUserProviderEnvForWorkflow(
   deps: WorkflowDeps,
   userId: string | undefined,
-  artifactsDir: string
+  artifactsDir: string,
+  requireCodexSubscription = false
 ): Promise<{ env: Record<string, string>; protectedValues: string[] }> {
   const perUserEnabled = deps.isPerUserProviderKeysEnabled?.() ?? false;
   if (!perUserEnabled || !userId || !deps.getUserProviderEnv) {
+    if (requireCodexSubscription) {
+      if (!perUserEnabled) failCredentialPolicy(credentialPolicyErrorCodes.providerKeysDisabled);
+      if (!userId) failCredentialPolicy(credentialPolicyErrorCodes.userRequired);
+      failCredentialPolicy(credentialPolicyErrorCodes.resolverUnavailable);
+    }
     return { env: {}, protectedValues: [] };
   }
   let resolved: Awaited<ReturnType<NonNullable<WorkflowDeps['getUserProviderEnv']>>>;
@@ -309,7 +343,55 @@ async function resolveUserProviderEnvForWorkflow(
     resolved = await deps.getUserProviderEnv(userId, artifactsDir);
   } catch (err) {
     getLog().warn({ err: err as Error, userId }, 'workflow.user_provider_env_resolve_failed');
+    if (requireCodexSubscription) {
+      failCredentialPolicy(credentialPolicyErrorCodes.resolutionFailed);
+    }
     return { env: {}, protectedValues: [] };
+  }
+
+  if (resolved.status === 'failed') {
+    if (requireCodexSubscription) {
+      failCredentialPolicy(credentialPolicyErrorCodes.resolutionFailed);
+    }
+    return { env: {}, protectedValues: [] };
+  }
+
+  if (requireCodexSubscription) {
+    if (
+      resolved.issues.some(
+        issue => issue.code === 'resolution_failed' && issue.vendor === undefined
+      )
+    ) {
+      failCredentialPolicy(credentialPolicyErrorCodes.resolutionFailed);
+    }
+    const codexCredential = resolved.credentials.find(item => item.vendor === 'openai');
+    if (!codexCredential) {
+      const codexIssue = resolved.issues.find(issue => issue.vendor === 'openai');
+      if (codexIssue?.code === 'credential_unusable') {
+        failCredentialPolicy(credentialPolicyErrorCodes.credentialUnusable);
+      }
+      if (codexIssue?.code === 'delivery_failed') {
+        failCredentialPolicy(credentialPolicyErrorCodes.deliveryFailed);
+      }
+      failCredentialPolicy(credentialPolicyErrorCodes.credentialMissing);
+    }
+    if (codexCredential.kind !== 'subscription') {
+      failCredentialPolicy(credentialPolicyErrorCodes.kindMismatch);
+    }
+    if (codexCredential.delivery !== 'managed_file') {
+      failCredentialPolicy(credentialPolicyErrorCodes.deliveryMismatch);
+    }
+    const expectedAuthPath = join(artifactsDir, CODEX_AUTH_JSON_RELATIVE_PATH);
+    const expectedCodexHome = dirname(expectedAuthPath);
+    const hasManagedCodexAuth =
+      resolved.env.CODEX_HOME === expectedCodexHome &&
+      resolved.files.some(file => file.path === expectedAuthPath);
+    if (!hasManagedCodexAuth) {
+      failCredentialPolicy(credentialPolicyErrorCodes.deliveryMismatch);
+    }
+    if (resolved.issues.some(issue => issue.vendor === 'openai')) {
+      failCredentialPolicy(credentialPolicyErrorCodes.deliveryFailed);
+    }
   }
 
   const { env, files, protectedValues } = resolved;
@@ -320,6 +402,9 @@ async function resolveUserProviderEnvForWorkflow(
     }
   } catch (err) {
     getLog().warn({ err: err as Error, userId }, 'workflow.user_provider_files_write_failed');
+    if (requireCodexSubscription) {
+      failCredentialPolicy(credentialPolicyErrorCodes.fileWriteFailed);
+    }
     return { env: {}, protectedValues };
   }
 
@@ -2820,11 +2905,34 @@ export async function executeWorkflow(
     return { success: false, workflowRunId: workflowRun.id, error: message };
   }
 
-  const { env: userProviderEnv, protectedValues } = await resolveUserProviderEnvForWorkflow(
-    deps,
-    executionUserId,
-    artifactsDir
-  );
+  const requireCodexSubscription =
+    effectiveRunConfig?.layer.credentialPolicy?.providers.codex?.requiredKind === 'subscription';
+  let userProviderEnv: Record<string, string>;
+  let protectedValues: string[];
+  try {
+    ({ env: userProviderEnv, protectedValues } = await resolveUserProviderEnvForWorkflow(
+      deps,
+      executionUserId,
+      artifactsDir,
+      requireCodexSubscription
+    ));
+  } catch (error) {
+    const code =
+      error instanceof CredentialPolicyError
+        ? error.code
+        : credentialPolicyErrorCodes.resolutionFailed;
+    getLog().error({ workflowRunId: workflowRun.id, code }, 'workflow.credential_policy_failed');
+    await sendCriticalMessage(
+      platform,
+      conversationId,
+      `Workflow blocked by credential policy: ${code}`
+    );
+    await requireTerminalStatusWrite(deps.store.failWorkflowRun(workflowRun.id, code), {
+      workflowRunId: workflowRun.id,
+      site: 'workflow.credential_policy_fail_db_record_failed',
+    });
+    return { success: false, workflowRunId: workflowRun.id, error: code };
+  }
   config.envVars = { ...config.envVars, ...userProviderEnv };
   for (const key of Object.keys(userProviderEnv)) {
     protectedEnvKeys.add(key);

@@ -87,6 +87,11 @@ describe('versionCommand', () => {
             version: 1,
             values: ['fatal', 'transient', 'unknown'],
           },
+          'workflow.credential_policy.codex': {
+            version: 1,
+            requiredKinds: ['subscription'],
+            evidence: 'local_credential_resolution',
+          },
         },
       })
     );

@@ -4,6 +4,25 @@ import { runAliasesConfigSchema, runTiersConfigSchema } from './model-binding';
 
 const providerDefaultsSchema = z.record(z.string(), z.unknown());
 
+export const workflowCredentialPolicySchema = z
+  .object({
+    providers: z
+      .object({
+        codex: z
+          .object({
+            requiredKind: z.literal('subscription'),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict(),
+  })
+  .strict()
+  .refine(policy => Object.values(policy.providers).some(Boolean), {
+    message: 'At least one provider credential policy is required',
+    path: ['providers'],
+  });
+
 export const workflowRunContinuationConfigSchema = z
   .object({
     autoResumeOnQuotaReset: z.boolean().optional(),
@@ -23,6 +42,7 @@ export const workflowRunConfigLayerSchema = z
     workflows: workflowRunContinuationConfigSchema.optional(),
     docsPath: z.string().trim().min(1).optional(),
     envVars: z.record(z.string(), z.string()).optional(),
+    credentialPolicy: workflowCredentialPolicySchema.optional(),
   })
   .strict();
 

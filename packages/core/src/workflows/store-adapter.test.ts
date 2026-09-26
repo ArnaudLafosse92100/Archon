@@ -124,10 +124,13 @@ mock.module('../credentials/config', () => ({
 }));
 
 const mockListDecryptedUserProviderCredentials = mock<
-  (_userId: string) => Promise<{ provider: string; cred: ResolvedCredential }[]>
->(async () => []);
+  (_userId: string) => Promise<{
+    credentials: { provider: string; cred: ResolvedCredential }[];
+    issues: { provider?: string; code: 'credential_unusable' | 'resolution_failed' }[];
+  }>
+>(async () => ({ credentials: [], issues: [] }));
 mock.module('../db/user-provider-key-store', () => ({
-  listDecryptedUserProviderCredentials: mockListDecryptedUserProviderCredentials,
+  listDecryptedUserProviderCredentialsWithIssues: mockListDecryptedUserProviderCredentials,
   saveUserProviderKey: mock(() => Promise.resolve()),
   getUserProviderKeyRecord: mock(() => Promise.resolve(null)),
   listUserProviderKeys: mock(() => Promise.resolve([])),
@@ -333,7 +336,10 @@ describe('createWorkflowDeps', () => {
   describe('provider credential fields', () => {
     beforeEach(() => {
       mockListDecryptedUserProviderCredentials.mockReset();
-      mockListDecryptedUserProviderCredentials.mockImplementation(async () => []);
+      mockListDecryptedUserProviderCredentials.mockImplementation(async () => ({
+        credentials: [],
+        issues: [],
+      }));
       mockIsPerUserProviderKeysEnabled.mockReset();
       mockIsPerUserProviderKeysEnabled.mockImplementation(() => false);
     });
@@ -348,7 +354,14 @@ describe('createWorkflowDeps', () => {
       mockListDecryptedUserProviderCredentials.mockRejectedValueOnce(new Error('db gone'));
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
-      expect(result).toEqual({ env: {}, files: [], protectedValues: [] });
+      expect(result).toEqual({
+        status: 'failed',
+        env: {},
+        files: [],
+        protectedValues: [],
+        credentials: [],
+        issues: [{ code: 'resolution_failed' }],
+      });
     });
 
     // Regression guard for #2035: enabling the credential vault (auto-key on by
@@ -357,45 +370,79 @@ describe('createWorkflowDeps', () => {
     // there is no scrub on the AI-provider path (unlike the GitHub org-token path).
     // A future change that scrubbed ambient provider keys would fail this.
     test('getUserProviderEnv is additive: unconnected user gets empty env (no ambient scrub)', async () => {
-      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([]);
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [],
+        issues: [],
+      });
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-unconnected', '/tmp/art');
-      expect(result).toEqual({ env: {}, files: [], protectedValues: [] });
+      expect(result).toEqual({
+        status: 'resolved',
+        env: {},
+        files: [],
+        protectedValues: [],
+        credentials: [],
+        issues: [],
+      });
     });
 
     test('getUserProviderEnv aggregates env from multiple providers', async () => {
-      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([
-        { provider: 'openrouter', cred: { kind: 'api_key', apiKey: 'or-k' } },
-        { provider: 'google', cred: { kind: 'api_key', apiKey: 'g-k' } },
-      ]);
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [
+          { provider: 'openrouter', cred: { kind: 'api_key', apiKey: 'or-k' } },
+          { provider: 'google', cred: { kind: 'api_key', apiKey: 'g-k' } },
+        ],
+        issues: [],
+      });
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
       expect(result?.env).toMatchObject({ OPENROUTER_API_KEY: 'or-k', GEMINI_API_KEY: 'g-k' });
       expect(result?.protectedValues).toEqual(['or-k', 'g-k']);
     });
 
+    test('getUserProviderEnv canonicalizes provider provenance and issue vendors', async () => {
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [],
+        issues: [{ provider: 'codex', code: 'credential_unusable' }],
+      });
+      const deps = createWorkflowDeps();
+
+      const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+
+      expect(result?.credentials).toEqual([]);
+      expect(result?.issues).toEqual([{ vendor: 'openai', code: 'credential_unusable' }]);
+    });
+
     test('getUserProviderEnv protects OAuth secrets without hiding public metadata', async () => {
-      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([
-        {
-          provider: 'openai',
-          cred: {
-            kind: 'oauth',
-            oauthApiKey: 'derived-bearer',
-            rawCreds: {
-              type: 'oauth',
-              access: 'access-token',
-              refresh: 'refresh-token',
-              id_token: 'id-token',
-              accountId: 'account-id',
-              enterpriseUrl: 'company.ghe.com',
-              availableModelIds: ['claude-sonnet-4', 'gpt-5'],
-              expires: 123,
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [
+          {
+            provider: 'openai',
+            cred: {
+              kind: 'oauth',
+              oauthApiKey: 'derived-bearer',
+              rawCreds: {
+                type: 'oauth',
+                access: 'access-token',
+                refresh: 'refresh-token',
+                id_token: 'id-token',
+                accountId: 'account-id',
+                enterpriseUrl: 'company.ghe.com',
+                availableModelIds: ['claude-sonnet-4', 'gpt-5'],
+                expires: 123,
+              },
             },
           },
-        },
-      ]);
+        ],
+        issues: [],
+      });
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+      expect(result?.status).toBe('resolved');
+      expect(result?.credentials).toEqual([
+        { vendor: 'openai', kind: 'subscription', delivery: 'managed_file' },
+      ]);
+      expect(result?.issues).toEqual([]);
       expect(result?.protectedValues).toEqual([
         'derived-bearer',
         'access-token',
@@ -407,6 +454,8 @@ describe('createWorkflowDeps', () => {
       expect(result?.protectedValues).not.toContain('company.ghe.com');
       expect(result?.protectedValues).not.toContain('claude-sonnet-4');
       expect(result?.protectedValues).not.toContain('gpt-5');
+      expect(JSON.stringify(result?.credentials)).not.toContain('access-token');
+      expect(JSON.stringify(result?.issues)).not.toContain('/tmp/art');
     });
   });
 });

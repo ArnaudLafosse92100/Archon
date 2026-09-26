@@ -22,7 +22,7 @@ import { encryptToken, getEncryptionKey } from '../utils/token-crypto';
 import type { GlobalConfig, RepoConfig } from './config-types';
 import { unsealWorkflowRunConfigStructure } from './run-config-handoff';
 
-type ConfigKey = keyof GlobalConfig | keyof RepoConfig;
+type ConfigKey = keyof GlobalConfig | keyof RepoConfig | 'credentialPolicy';
 type KeyClassification = { kind: 'runtime' } | { kind: 'unavailable'; reason: string };
 
 const keyClassifications = {
@@ -34,6 +34,7 @@ const keyClassifications = {
   workflows: { kind: 'runtime' },
   docs: { kind: 'runtime' },
   env: { kind: 'runtime' },
+  credentialPolicy: { kind: 'runtime' },
   commands: {
     kind: 'unavailable',
     reason: 'workflow and command discovery already ran before run dispatch',
@@ -212,6 +213,7 @@ export function parseWorkflowRunConfig(
     ...(value.workflows !== undefined ? { workflows: value.workflows } : {}),
     ...(isRecord(docs) && docs.path !== undefined ? { docsPath: docs.path } : {}),
     ...(value.env !== undefined ? { envVars: value.env } : {}),
+    ...(value.credentialPolicy !== undefined ? { credentialPolicy: value.credentialPolicy } : {}),
   };
   const parsed = workflowRunConfigLayerSchema.safeParse(candidate);
   if (!parsed.success) throw validationError(parsed.error);
@@ -251,6 +253,9 @@ function configuredKeyPaths(layer: WorkflowRunConfigLayer): string[] {
   for (const field of Object.keys(layer.workflows ?? {})) paths.push(`workflows.${field}`);
   if (layer.docsPath !== undefined) paths.push('docs.path');
   for (const name of Object.keys(layer.envVars ?? {})) paths.push(`env.${name}`);
+  if (layer.credentialPolicy?.providers.codex !== undefined) {
+    paths.push('credentialPolicy.providers.codex.requiredKind');
+  }
   return paths.sort();
 }
 

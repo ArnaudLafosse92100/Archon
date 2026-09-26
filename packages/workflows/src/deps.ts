@@ -32,6 +32,38 @@ export const MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS = [
   PI_AUTH_JSON_RELATIVE_PATH,
 ] as const;
 
+export type ProviderCredentialKind = 'api_key' | 'subscription';
+export type ProviderCredentialDelivery = 'environment' | 'managed_file';
+
+export interface ProviderCredentialProvenance {
+  vendor: string;
+  kind: ProviderCredentialKind;
+  delivery: ProviderCredentialDelivery;
+}
+
+export interface ProviderCredentialResolutionIssue {
+  vendor?: string;
+  code: 'credential_unusable' | 'delivery_failed' | 'resolution_failed';
+}
+
+export type UserProviderEnvResolution =
+  | {
+      status: 'resolved';
+      env: Record<string, string>;
+      files: { path: string; contents: string }[];
+      protectedValues: string[];
+      credentials: ProviderCredentialProvenance[];
+      issues: ProviderCredentialResolutionIssue[];
+    }
+  | {
+      status: 'failed';
+      env: Record<string, never>;
+      files: [];
+      protectedValues: [];
+      credentials: [];
+      issues: ProviderCredentialResolutionIssue[];
+    };
+
 // Re-export provider types so existing workflow engine consumers don't break
 export type {
   IAgentProvider,
@@ -189,17 +221,11 @@ export interface WorkflowDeps {
    * map — the engine just merges `env` into `config.envVars` and writes the
    * `files` before any provider invocation.
    *
-   * Must never throw — return empty bags on any failure so the
-   * workflow continues with whatever env inheritance was already in place.
+   * Return a typed failure with non-secret issue codes when resolution fails.
+   * Runs without a credential policy preserve the legacy soft-fallback behavior;
+   * strict runs interpret missing or mismatched provenance as a pre-DAG failure.
    */
-  getUserProviderEnv?: (
-    userId: string,
-    artifactsDir: string
-  ) => Promise<{
-    env: Record<string, string>;
-    files: { path: string; contents: string }[];
-    protectedValues: string[];
-  }>;
+  getUserProviderEnv?: (userId: string, artifactsDir: string) => Promise<UserProviderEnvResolution>;
   /**
    * Optional: resolve the originating user's personal AI preferences (model
    * tiers, `@custom` aliases, default assistant) from the DB. Folded into

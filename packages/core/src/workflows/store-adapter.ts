@@ -3,7 +3,13 @@
  * IWorkflowStore trait defined in @archon/workflows.
  */
 import type { IWorkflowStore } from '@archon/workflows/store';
-import type { WorkflowConfig, WorkflowDeps } from '@archon/workflows/deps';
+import type {
+  ProviderCredentialProvenance,
+  ProviderCredentialResolutionIssue,
+  UserProviderEnvResolution,
+  WorkflowConfig,
+  WorkflowDeps,
+} from '@archon/workflows/deps';
 import type { WorkflowRunStatus } from '@archon/workflows/schemas/workflow-run';
 import type { MergedConfig } from '../config/config-types';
 import * as workflowDb from '../db/workflows';
@@ -28,8 +34,9 @@ import {
   buildPiAuthJson,
   PI_AUTH_JSON_RELATIVE_PATH,
   PI_AUTH_PATH_ENV,
+  normalizeCredentialVendor,
 } from '../credentials/delivery';
-import { listDecryptedUserProviderCredentials } from '../db/user-provider-key-store';
+import { listDecryptedUserProviderCredentialsWithIssues } from '../db/user-provider-key-store';
 import { getUserAiPrefs, type UserAiPrefs } from '../db/user-ai-prefs-store';
 import { sealWorkflowRunConfig, unsealWorkflowRunConfig } from '../config/run-config';
 
@@ -179,21 +186,29 @@ export function createWorkflowDeps(): WorkflowDeps {
     getUserProviderEnv: async (
       userId: string,
       artifactsDir: string
-    ): Promise<{
-      env: Record<string, string>;
-      files: { path: string; contents: string }[];
-      protectedValues: string[];
-    }> => {
+    ): Promise<UserProviderEnvResolution> => {
       try {
-        const creds = await listDecryptedUserProviderCredentials(userId);
+        const resolvedCredentials = await listDecryptedUserProviderCredentialsWithIssues(userId);
+        const creds = resolvedCredentials.credentials;
         const env: Record<string, string> = {};
         const files: { path: string; contents: string }[] = [];
         const protectedValues = new Set<string>();
+        const credentials: ProviderCredentialProvenance[] = [];
+        const issues: ProviderCredentialResolutionIssue[] = resolvedCredentials.issues.map(issue =>
+          issue.provider === undefined
+            ? { code: issue.code }
+            : { vendor: normalizeCredentialVendor(issue.provider), code: issue.code }
+        );
         for (const { provider, cred } of creds) {
           try {
             const result = deliverCredential(provider, cred, { artifactsDir });
             Object.assign(env, result.env);
             if (result.files) files.push(...result.files);
+            credentials.push({
+              vendor: normalizeCredentialVendor(provider),
+              kind: cred.kind === 'oauth' ? 'subscription' : 'api_key',
+              delivery: result.files?.length ? 'managed_file' : 'environment',
+            });
             if (cred.kind === 'api_key') {
               protectedValues.add(cred.apiKey);
             } else {
@@ -208,6 +223,7 @@ export function createWorkflowDeps(): WorkflowDeps {
               { err: err as Error, userId, provider },
               'workflow_deps.provider_creds_deliver_failed'
             );
+            issues.push({ vendor: normalizeCredentialVendor(provider), code: 'delivery_failed' });
           }
         }
         // Aggregate Pi auth.json (the user's keys + subscriptions) so a `pi` node
@@ -221,10 +237,24 @@ export function createWorkflowDeps(): WorkflowDeps {
             env[PI_AUTH_PATH_ENV] = piAuthPath;
           }
         }
-        return { env, files, protectedValues: [...protectedValues] };
+        return {
+          status: 'resolved' as const,
+          env,
+          files,
+          protectedValues: [...protectedValues],
+          credentials,
+          issues,
+        };
       } catch (err) {
         getLog().warn({ err: err as Error, userId }, 'workflow_deps.provider_creds_resolve_failed');
-        return { env: {}, files: [], protectedValues: [] };
+        return {
+          status: 'failed' as const,
+          env: {},
+          files: [],
+          protectedValues: [],
+          credentials: [],
+          issues: [{ code: 'resolution_failed' as const }],
+        };
       }
     },
     // Per-user AI prefs (Phase 3): personal tiers/aliases/default-provider,

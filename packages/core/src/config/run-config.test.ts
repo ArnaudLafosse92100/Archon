@@ -277,6 +277,44 @@ describe('workflow run config', () => {
     expect(unsealWorkflowRunConfig(metadata)).toEqual(input.layer);
   });
 
+  it('seals and restores the Codex subscription policy without exposing its value', () => {
+    const input = parseWorkflowRunConfig(
+      {
+        credentialPolicy: {
+          providers: { codex: { requiredKind: 'subscription' } },
+        },
+      },
+      { kind: 'cli', label: 'config.yaml' }
+    );
+    const metadata = sealWorkflowRunConfig(input.layer, input.source);
+    const serialized = JSON.stringify(metadata);
+
+    expect(metadata.keys).toContain('credentialPolicy.providers.codex.requiredKind');
+    expect(serialized).not.toContain('subscription');
+    expect(unsealWorkflowRunConfig(metadata)).toEqual(input.layer);
+  });
+
+  it('rejects unsupported credential policy kinds and providers', () => {
+    expect(() =>
+      parseWorkflowRunConfig(
+        { credentialPolicy: { providers: {} } },
+        { kind: 'http', label: 'inline' }
+      )
+    ).toThrow();
+    expect(() =>
+      parseWorkflowRunConfig(
+        { credentialPolicy: { providers: { codex: { requiredKind: 'api_key' } } } },
+        { kind: 'http', label: 'inline' }
+      )
+    ).toThrow();
+    expect(() =>
+      parseWorkflowRunConfig(
+        { credentialPolicy: { providers: { openrouter: { requiredKind: 'subscription' } } } },
+        { kind: 'http', label: 'inline' }
+      )
+    ).toThrow();
+  });
+
   it('fails explicitly when persisted ciphertext is tampered with', () => {
     const input = parseWorkflowRunConfig(
       { env: { TOKEN: 'env-secret' } },

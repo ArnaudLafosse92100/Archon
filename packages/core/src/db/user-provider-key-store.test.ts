@@ -53,6 +53,7 @@ import {
   deleteUserProviderKey,
   getDecryptedProviderCredential,
   listDecryptedUserProviderCredentials,
+  listDecryptedUserProviderCredentialsWithIssues,
 } from './user-provider-key-store';
 import type { UserProviderKeyRow } from '../schemas/user-provider-key-row';
 
@@ -421,6 +422,18 @@ describe('user-provider-key-store', () => {
       expect(out).toEqual([]);
     });
 
+    test('returns a stable non-secret issue when the list query fails', async () => {
+      const secret = 'do-not-serialize-this';
+      const path = '/private/provider-store';
+      mockQuery.mockRejectedValueOnce(new Error(`${secret} at ${path}`));
+
+      const out = await listDecryptedUserProviderCredentialsWithIssues('user-1');
+
+      expect(out).toEqual({ credentials: [], issues: [{ code: 'resolution_failed' }] });
+      expect(JSON.stringify(out)).not.toContain(secret);
+      expect(JSON.stringify(out)).not.toContain(path);
+    });
+
     test('returns partial results (does not throw) when a per-provider fetch fails', async () => {
       // List query: two providers.
       mockQuery.mockResolvedValueOnce(
@@ -444,6 +457,22 @@ describe('user-provider-key-store', () => {
       expect(out).toHaveLength(1);
       expect(out[0]!.provider).toBe('claude');
       expect(out[0]!.cred).toEqual({ kind: 'api_key', apiKey: 'sk-claude-test' });
+    });
+
+    test('preserves the failed provider without leaking its failure detail', async () => {
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([{ provider: 'codex', kind: 'oauth', label: 'sub' }])
+      );
+      mockQuery.mockRejectedValueOnce(new Error('refresh token leaked from /private/oauth'));
+
+      const out = await listDecryptedUserProviderCredentialsWithIssues('user-1');
+
+      expect(out).toEqual({
+        credentials: [],
+        issues: [{ provider: 'codex', code: 'credential_unusable' }],
+      });
+      expect(JSON.stringify(out)).not.toContain('refresh token');
+      expect(JSON.stringify(out)).not.toContain('/private/oauth');
     });
 
     test('logs ERROR (not WARN) when ALL per-provider fetches fail (mass_decrypt_failure)', async () => {
