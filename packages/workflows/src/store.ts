@@ -53,6 +53,8 @@ export interface DagResumeSnapshot {
 export interface WorkflowWaitCompletion {
   stepName: string;
   result: WorkflowWaitResult;
+  /** Non-secret identity shared by the wait node's atomic terminal lifecycle row. */
+  lifecycleData: Readonly<Record<string, unknown>>;
 }
 
 export type WorkflowWaitPause = { kind: 'started'; stepName: string } | { kind: 'continued' };

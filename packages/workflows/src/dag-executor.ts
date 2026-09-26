@@ -754,6 +754,10 @@ type NodeExecutionResult = NodeOutput & {
   loopIterations?: number;
 };
 
+type NodeCompletionGuard = () => Promise<string | undefined>;
+
+class CheckoutMutationError extends Error {}
+
 /**
  * Add provider usage, keeping each cache axis that was actually reported and marking the
  * result a floor when some contribution stayed silent (see `mergeTokenUsage`).
@@ -1307,28 +1311,21 @@ async function snapshotCheckout(
  * Enforce a node's `mutates_checkout: false` declaration (#2771): when the node ran
  * successfully but the pre-run snapshot changed, rewrite its result to a failure that
  * names the node and lists what moved, and persist the standard `node_failed` event so
- * the violation surfaces like any other node failure. Applied OUTSIDE the retry loop so
- * the failure is non-retryable by construction — retrying a node that provably mutates
- * would only multiply the damage. A node that already failed keeps its own attributable
- * outcome; an absent snapshot (`undefined`) means the check could not run and is skipped.
+ * the violation surfaces like any other node failure. The snapshot spans the complete
+ * retry operation, but this check runs inside the successful attempt's finalizer before
+ * `node_completed`; its failure is explicitly non-retryable, because retrying a node that
+ * provably mutates would only multiply the damage. A node that already failed keeps its
+ * own attributable outcome; an absent snapshot (`undefined`) skips the check.
  */
-async function assertCheckoutUntouched(
+async function checkoutMutationViolation(
   node: DagNode,
   cwd: string,
   excludeDirs: readonly string[],
-  before: string | undefined,
-  result: NodeExecutionResult,
-  deps: WorkflowDeps,
-  workflowRunId: string,
-  stepName: string
-): Promise<NodeExecutionResult> {
-  if (node.mutates_checkout !== false || before === undefined || result.state !== 'completed') {
-    return result;
-  }
+  before: string | undefined
+): Promise<string | undefined> {
+  if (node.mutates_checkout !== false || before === undefined) return undefined;
   const after = await snapshotCheckout(cwd, excludeDirs);
-  if (after === undefined || after === before) {
-    return result;
-  }
+  if (after === undefined || after === before) return undefined;
   const changedPaths = after
     .split('\n')
     .filter(Boolean)
@@ -1337,28 +1334,7 @@ async function assertCheckoutUntouched(
     .join(', ');
   const error = `Node \`${node.id}\` declared \`mutates_checkout: false\` but modified the working tree: ${changedPaths}`;
   getLog().error({ nodeId: node.id, changed: changedPaths }, 'dag_mutates_checkout_violation');
-  const emitter = getWorkflowEventEmitter();
-  deps.store
-    .createWorkflowEvent({
-      workflow_run_id: workflowRunId,
-      event_type: 'node_failed',
-      step_name: stepName,
-      data: nodeFailureData(error),
-    })
-    .catch((err: Error) => {
-      getLog().error(
-        { err, workflowRunId, eventType: 'node_failed' },
-        'workflow_event_persist_failed'
-      );
-    });
-  emitter.emit({
-    type: 'node_failed',
-    runId: workflowRunId,
-    nodeId: node.id,
-    nodeName: node.id,
-    error,
-  });
-  return { ...result, state: 'failed', output: '', error };
+  return error;
 }
 
 /**
@@ -2154,7 +2130,8 @@ async function executeNodeInternal(
   resolvedEffort?: EffortLevel,
   stepNamePrefix = '',
   iteration?: number,
-  checkpointSession?: SessionCheckpoint
+  checkpointSession?: SessionCheckpoint,
+  completionGuard?: NodeCompletionGuard
 ): Promise<NodeExecutionResult> {
   const {
     deps,
@@ -2269,11 +2246,12 @@ async function executeNodeInternal(
   // transcript, persisted event, emitter, and throttle cleanup cannot drift.
   const failAgentNode = async (
     error: string,
-    extras: { output?: string; data?: Record<string, unknown> } = {}
+    extras: { output?: string; data?: Record<string, unknown>; retryable?: false } = {}
   ): Promise<NodeExecutionResult> => {
     const usage = nodeUsageEventData();
     await logNodeError(logDir, workflowRun.id, node.id, error, usage);
 
+    markLifecycleTerminal(ctx, stepName);
     deps.store
       .createWorkflowEvent({
         workflow_run_id: workflowRun.id,
@@ -2312,33 +2290,38 @@ async function executeNodeInternal(
       error,
       costUsd: nodeCostUsd,
       ...(nodeTokens !== undefined ? { tokens: nodeTokens } : {}),
+      ...(extras.retryable !== undefined ? { retryable: extras.retryable } : {}),
     };
   };
 
   // Load prompt
   let rawPrompt: string;
   if (commandName !== undefined) {
-    await assertWorkflowSourceIntegrity(workflowSourceRoots);
-    const promptResult = await loadCommandPrompt(
-      deps,
-      cwd,
-      commandName,
-      configuredCommandFolder,
-      workflowSourceRoots
-    );
-    if (!promptResult.success) {
-      const errMsg = promptResult.message;
-      getLog().error({ nodeId: node.id, error: errMsg }, 'dag_node_command_load_failed');
-      return failAgentNode(errMsg);
+    try {
+      await assertWorkflowSourceIntegrity(workflowSourceRoots);
+      const promptResult = await loadCommandPrompt(
+        deps,
+        cwd,
+        commandName,
+        configuredCommandFolder,
+        workflowSourceRoots
+      );
+      if (!promptResult.success) {
+        const errMsg = promptResult.message;
+        getLog().error({ nodeId: node.id, error: errMsg }, 'dag_node_command_load_failed');
+        return await failAgentNode(errMsg);
+      }
+      rawPrompt = promptResult.content;
+    } catch (error) {
+      return failAgentNode((error as Error).message);
     }
-    rawPrompt = promptResult.content;
   } else {
     // commandName undefined implies node.source.kind === 'inline' by construction
     // (AgentBody.source is a two-member union) — but the compiler can't correlate
     // that back across the two independent derivations, so fail loud rather than
     // silently defaulting if that ever stops being true.
     if (node.source.kind !== 'inline') {
-      throw new Error(
+      return failAgentNode(
         `unreachable: node '${node.id}' has no commandName but source.kind is not 'inline'`
       );
     }
@@ -2397,9 +2380,14 @@ async function executeNodeInternal(
   }
 
   // Substitute upstream node output references
-  const finalPrompt = substituteNodeOutputRefs(substitutedPrompt, nodeOutputs);
-
-  const aiClient = deps.getAgentProvider(provider);
+  let finalPrompt: string;
+  let aiClient: ReturnType<typeof deps.getAgentProvider>;
+  try {
+    finalPrompt = substituteNodeOutputRefs(substitutedPrompt, nodeOutputs);
+    aiClient = deps.getAgentProvider(provider);
+  } catch (error) {
+    return failAgentNode((error as Error).message);
+  }
   const streamingMode = platform.getStreamingMode();
 
   let nodeOutputText = ''; // Always accumulate regardless of streaming mode
@@ -3278,6 +3266,11 @@ async function executeNodeInternal(
       if (badPointer !== null) throw new Error(`Node '${node.id}': ${badPointer}.`);
     }
 
+    const checkoutViolation = await completionGuard?.();
+    if (checkoutViolation !== undefined) {
+      return await failAgentNode(checkoutViolation, { retryable: false });
+    }
+
     const duration = Date.now() - nodeStartTime;
     getLog().info({ nodeId: node.id, durationMs: duration }, 'dag_node_completed');
     await logNodeComplete(logDir, workflowRun.id, node.id, commandName ?? '<inline>', {
@@ -3285,6 +3278,7 @@ async function executeNodeInternal(
       ...nodeUsageEventData(),
     });
 
+    markLifecycleTerminal(ctx, stepName);
     deps.store
       .createWorkflowEvent({
         workflow_run_id: workflowRun.id,
@@ -3754,6 +3748,7 @@ async function recordExecTimeoutSkip(
     );
   });
 
+  markLifecycleTerminal(ctx, stepName);
   ctx.deps.store
     .createWorkflowEvent({
       workflow_run_id: ctx.workflowRun.id,
@@ -3894,7 +3889,8 @@ async function executeBashNode(
   // applyLoopPrevToBodyNode before this function runs; this env var is what a script that
   // reads the variable indirectly (${LOOP_USER_INPUT}, printenv, env) actually sees. ''
   // for top-level bash nodes and non-first iterations.
-  loopUserInput = ''
+  loopUserInput = '',
+  completionGuard?: NodeCompletionGuard
 ): Promise<NodeOutput> {
   const {
     deps,
@@ -3917,6 +3913,7 @@ async function executeBashNode(
   const stepName = stepNamePrefix + node.id;
   const iterationData = iteration !== undefined ? { iteration } : {};
   const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
+  registerLifecycleAttempt(ctx, stepName, lifecycleData);
 
   getLog().info({ nodeId: node.id, type: 'bash' }, 'dag_node_started');
   await logNodeStart(logDir, workflowRun.id, node.id, '<bash>');
@@ -4040,12 +4037,16 @@ async function executeBashNode(
     const output = certified.output;
     await assertExecArtifactPointers(workflowRun, node, certified.structuredOutput);
 
+    const checkoutViolation = await completionGuard?.();
+    if (checkoutViolation !== undefined) throw new CheckoutMutationError(checkoutViolation);
+
     const duration = Date.now() - nodeStartTime;
     getLog().info({ nodeId: node.id, durationMs: duration }, 'dag_node_completed');
     await logNodeComplete(logDir, workflowRun.id, node.id, '<bash>', { durationMs: duration });
 
     const persistedOutput = formatPersistedNodeOutput(output, artifactsDir, stepName);
 
+    markLifecycleTerminal(ctx, stepName);
     deps.store
       .createWorkflowEvent({
         workflow_run_id: workflowRun.id,
@@ -4094,7 +4095,8 @@ async function executeBashNode(
     // A contract failure (#2453) is Archon's own diagnosis of stdout, not a subprocess
     // rejection. Report it verbatim and keep it outside subprocess classification.
     const contractFailure = error instanceof ExecOutputContractError;
-    const isTimeout = !contractFailure && isSubprocessTimeout(err);
+    const checkoutMutation = error instanceof CheckoutMutationError;
+    const isTimeout = !contractFailure && !checkoutMutation && isSubprocessTimeout(err);
     if (isTimeout && node.on_timeout === 'skip') {
       return recordExecTimeoutSkip(ctx, node, 'bash', stepName, iterationData, lifecycleData);
     }
@@ -4104,7 +4106,7 @@ async function executeBashNode(
     // full `Command failed: bash -c <body>` line and would otherwise leak.
     const formatted = formatSubprocessFailure(err, label);
     let errorMsg: string;
-    if (contractFailure) {
+    if (contractFailure || checkoutMutation) {
       errorMsg = err.message;
     } else if (isTimeout) {
       errorMsg = `${label} timed out after ${String(timeout)}ms`;
@@ -4125,6 +4127,7 @@ async function executeBashNode(
     );
     await logNodeError(logDir, workflowRun.id, node.id, errorMsg);
 
+    markLifecycleTerminal(ctx, stepName);
     deps.store
       .createWorkflowEvent({
         workflow_run_id: workflowRun.id,
@@ -4151,7 +4154,7 @@ async function executeBashNode(
       state: 'failed',
       output: '',
       error: errorMsg,
-      ...(contractFailure ? { retryable: false as const } : {}),
+      ...(contractFailure || checkoutMutation ? { retryable: false as const } : {}),
     };
   }
 }
@@ -4220,7 +4223,8 @@ async function executeScriptNode(
   // same env-var parameter (#2725), but additionally has the literal "$LOOP_USER_INPUT"
   // token pre-spliced (shell-quoted) into its script source by applyLoopPrevToBodyNode
   // before it runs — a channel script deliberately has no equivalent of.
-  loopUserInput = ''
+  loopUserInput = '',
+  completionGuard?: NodeCompletionGuard
 ): Promise<NodeOutput> {
   const {
     deps,
@@ -4244,6 +4248,7 @@ async function executeScriptNode(
   const stepName = stepNamePrefix + node.id;
   const iterationData = iteration !== undefined ? { iteration } : {};
   const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
+  registerLifecycleAttempt(ctx, stepName, lifecycleData);
 
   getLog().info({ nodeId: node.id, type: 'script', runtime: node.runtime }, 'dag_node_started');
   await logNodeStart(logDir, workflowRun.id, node.id, '<script>');
@@ -4384,6 +4389,7 @@ async function executeScriptNode(
           nodeName: node.id,
           error: errorMsg,
         });
+        markLifecycleTerminal(ctx, stepName);
         deps.store
           .createWorkflowEvent({
             workflow_run_id: workflowRun.id,
@@ -4415,6 +4421,7 @@ async function executeScriptNode(
           nodeName: node.id,
           error: errorMsg,
         });
+        markLifecycleTerminal(ctx, stepName);
         deps.store
           .createWorkflowEvent({
             workflow_run_id: workflowRun.id,
@@ -4476,12 +4483,16 @@ async function executeScriptNode(
     const output = certified.output;
     await assertExecArtifactPointers(workflowRun, node, certified.structuredOutput);
 
+    const checkoutViolation = await completionGuard?.();
+    if (checkoutViolation !== undefined) throw new CheckoutMutationError(checkoutViolation);
+
     const duration = Date.now() - nodeStartTime;
     getLog().info({ nodeId: node.id, durationMs: duration }, 'dag_node_completed');
     await logNodeComplete(logDir, workflowRun.id, node.id, '<script>', { durationMs: duration });
 
     const persistedOutput = formatPersistedNodeOutput(output, artifactsDir, stepName);
 
+    markLifecycleTerminal(ctx, stepName);
     deps.store
       .createWorkflowEvent({
         workflow_run_id: workflowRun.id,
@@ -4528,7 +4539,8 @@ async function executeScriptNode(
     const err = error as RawSubprocessRejection;
     // See executeBashNode: a contract failure (#2453) stays outside subprocess classification.
     const contractFailure = error instanceof ExecOutputContractError;
-    const isTimeout = !contractFailure && isSubprocessTimeout(err);
+    const checkoutMutation = error instanceof CheckoutMutationError;
+    const isTimeout = !contractFailure && !checkoutMutation && isSubprocessTimeout(err);
     if (isTimeout && node.on_timeout === 'skip') {
       return recordExecTimeoutSkip(ctx, node, 'script', stepName, iterationData, lifecycleData);
     }
@@ -4538,7 +4550,7 @@ async function executeScriptNode(
     // full `Command failed: bun -e <body>` line and would otherwise leak.
     const formatted = formatSubprocessFailure(err, label);
     let errorMsg: string;
-    if (contractFailure) {
+    if (contractFailure || checkoutMutation) {
       errorMsg = err.message;
     } else if (isTimeout) {
       errorMsg = `${label} timed out after ${String(timeout)}ms`;
@@ -4556,6 +4568,7 @@ async function executeScriptNode(
     );
     await logNodeError(logDir, workflowRun.id, node.id, errorMsg);
 
+    markLifecycleTerminal(ctx, stepName);
     deps.store
       .createWorkflowEvent({
         workflow_run_id: workflowRun.id,
@@ -4582,7 +4595,7 @@ async function executeScriptNode(
       state: 'failed',
       output: '',
       error: errorMsg,
-      ...(contractFailure ? { retryable: false as const } : {}),
+      ...(contractFailure || checkoutMutation ? { retryable: false as const } : {}),
     };
   }
 }
@@ -4850,6 +4863,7 @@ async function executeLoopGroupNode(
   const msgContext = { workflowId: workflowRun.id, nodeName: node.id };
   // This group's OWN persisted step_name — namespaced by any enclosing group so nested
   // loop_groups compose (e.g. `outer.inner`); '' → node.id at the top level (#2090).
+  const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
   const stepName = stepNamePrefix + node.id;
 
   // Body layering is recomputed per iteration from the (possibly $LOOP_PREV-substituted)
@@ -5136,6 +5150,7 @@ async function executeLoopGroupNode(
             event_type: 'node_completed',
             step_name: stepName,
             data: {
+              ...lifecycleData,
               node_output: resumedOutput,
               ...(resumedStructuredOutput !== undefined
                 ? { structured_output: resumedStructuredOutput }
@@ -5333,6 +5348,7 @@ async function executeLoopGroupNode(
       // (${LOOP_USER_INPUT}, printenv, env) that splice can't reach.
       bodyLoopUserInput: userInputForIter,
       loopPrevOutputs: prevSnapshot ?? new Map(),
+      activeLifecycleAttempts: ctx.activeLifecycleAttempts,
     };
     await runLayers(iterCtx);
 
@@ -5652,6 +5668,7 @@ async function executeLoopGroupNode(
           event_type: 'node_completed',
           step_name: stepName,
           data: {
+            ...lifecycleData,
             duration_ms: duration,
             node_output: lastIterationOutput,
             // The terminal sink's logical value (#2637) — persisted so cold resume
@@ -6012,6 +6029,7 @@ async function executeLoopNode(
       ...(extras.costUsd !== undefined ? { cost_usd: extras.costUsd } : {}),
     };
     await logNodeError(logDir, workflowRun.id, node.id, error, loopUsage);
+    markLifecycleTerminal(ctx, stepName);
     deps.store
       .createWorkflowEvent({
         workflow_run_id: workflowRun.id,
@@ -6096,6 +6114,7 @@ async function executeLoopNode(
       finalizeStructured ?? undefined,
       lifecycleData
     );
+    markLifecycleTerminal(ctx, stepName);
     // Same declared-field capture as the normal completion return below and as the
     // resume-hydration path (#2091). This is a COMPLETION exit, so a consumer's
     // `$loop.output.field` must get the identical strict contract here: without it a
@@ -6144,14 +6163,19 @@ async function executeLoopNode(
       );
       return failLoopNode(errorMsg, { data: { command: loop.command } });
     } else {
-      await assertWorkflowSourceIntegrity(workflowSourceRoots);
-      const promptResult = await loadCommandPrompt(
-        deps,
-        cwd,
-        loop.command,
-        configuredCommandFolder,
-        workflowSourceRoots
-      );
+      let promptResult: Awaited<ReturnType<typeof loadCommandPrompt>>;
+      try {
+        await assertWorkflowSourceIntegrity(workflowSourceRoots);
+        promptResult = await loadCommandPrompt(
+          deps,
+          cwd,
+          loop.command,
+          configuredCommandFolder,
+          workflowSourceRoots
+        );
+      } catch (error) {
+        return failLoopNode((error as Error).message, { data: { command: loop.command } });
+      }
       if (!promptResult.success) {
         getLog().error(
           { nodeId: node.id, command: loop.command, error: promptResult.message },
@@ -6216,7 +6240,17 @@ async function executeLoopNode(
     // node in the same topological layer may pause the run while this loop
     // is between iterations — the loop should continue its own iterations
     // regardless of unrelated pauses elsewhere in the DAG.
-    const runStatus = await deps.store.getWorkflowRunStatus(workflowRun.id);
+    let runStatus: Awaited<ReturnType<typeof deps.store.getWorkflowRunStatus>>;
+    try {
+      runStatus = await deps.store.getWorkflowRunStatus(workflowRun.id);
+    } catch (error) {
+      return failLoopNode((error as Error).message, {
+        costUsd: loopTotalCostUsd,
+        ...(loopTotalTokens !== undefined ? { tokens: loopTotalTokens } : {}),
+        loopIterations: i - 1,
+        data: { iteration: i },
+      });
+    }
     if (!shouldContinueStreamingForStatus(runStatus)) {
       const effectiveStatus = runStatus ?? 'deleted';
       getLog().info(
@@ -7313,6 +7347,7 @@ async function executeLoopNode(
       );
       // Write node_completed event so resume hydration knows this
       // node is done. Without this, a resumed DAG would re-enter the loop node.
+      markLifecycleTerminal(ctx, stepName);
       deps.store
         .createWorkflowEvent({
           workflow_run_id: workflowRun.id,
@@ -7709,10 +7744,12 @@ async function executeWaitNode(
   } as const;
   const output = JSON.stringify(result);
   const stepName = stepNamePrefix + node.id;
+  const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
   if (persisted !== undefined) {
     const { cleared } = await deps.store.clearWorkflowWaitContext(workflowRun.id, context, {
       stepName,
       result,
+      lifecycleData,
     });
     if (!cleared) {
       throw new Error(`Wait node '${node.id}' lost ownership of its persisted wait cursor`);
@@ -7729,6 +7766,7 @@ async function executeWaitNode(
       event_type: 'node_completed',
       step_name: stepName,
       data: {
+        ...lifecycleData,
         type: 'wait',
         duration_ms: result.waited_ms,
         node_output: output,
@@ -7987,6 +8025,7 @@ async function executeWorkflowNode(
   const { deps, platform, conversationId, cwd, workflowRun: parentRun } = ctx;
   const msgContext = { workflowId: parentRun.id, nodeName: node.id };
   const executionNodeId = ctx.stepNamePrefix + node.id;
+  const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
 
   // Build the failed result AND persist a node_failed event with the reason. Unlike
   // command/prompt/bash/script nodes (which write their own node_failed inside their
@@ -8005,6 +8044,7 @@ async function executeWorkflowNode(
         event_type: 'node_failed',
         step_name: executionNodeId,
         data: nodeFailureData(error, {
+          ...lifecycleData,
           type: 'workflow',
           ...(costUsd !== undefined ? { cost_usd: costUsd } : {}),
           ...(tokens !== undefined ? { tokens } : {}),
@@ -8141,6 +8181,7 @@ async function executeWorkflowNode(
         event_type: 'node_completed',
         step_name: executionNodeId,
         data: {
+          ...lifecycleData,
           node_output: output,
           type: 'workflow',
           child_run_id: outcome.childRunId,
@@ -8577,6 +8618,7 @@ async function executeFanOutWorkflowNode(
   const { deps, platform, conversationId, cwd, workflowRun: parentRun } = ctx;
   const msgContext = { workflowId: parentRun.id, nodeName: node.id };
   const stepName = ctx.stepNamePrefix + node.id;
+  const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
 
   // node_failed writer (mirrors executeWorkflowNode.failResult) — a fan-out failure may
   // still carry accumulated cost/tokens so spend over already-run children is tracked.
@@ -8591,6 +8633,7 @@ async function executeFanOutWorkflowNode(
         event_type: 'node_failed',
         step_name: stepName,
         data: nodeFailureData(error, {
+          ...lifecycleData,
           type: 'workflow',
           ...(costUsd !== undefined ? { cost_usd: costUsd } : {}),
           ...(tokens !== undefined ? { tokens } : {}),
@@ -8633,6 +8676,7 @@ async function executeFanOutWorkflowNode(
         event_type: 'node_completed',
         step_name: stepName,
         data: {
+          ...lifecycleData,
           node_output: output,
           type: 'workflow',
           fan_out: true,
@@ -9238,6 +9282,7 @@ async function executeComposeFanOutNode(
   const { deps, platform, conversationId, cwd, workflowRun: parentRun } = ctx;
   const msgContext = { workflowId: parentRun.id, nodeName: node.id };
   const stepName = ctx.stepNamePrefix + node.id;
+  const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
 
   const failResult = (
     error: string,
@@ -9250,6 +9295,7 @@ async function executeComposeFanOutNode(
         event_type: 'node_failed',
         step_name: stepName,
         data: nodeFailureData(error, {
+          ...lifecycleData,
           type: 'compose_fan_out',
           aggregate: true,
           ...(costUsd !== undefined ? { cost_usd: costUsd } : {}),
@@ -9292,6 +9338,7 @@ async function executeComposeFanOutNode(
         event_type: 'node_completed',
         step_name: stepName,
         data: {
+          ...lifecycleData,
           node_output: output,
           type: 'compose_fan_out',
           fan_out: true,
@@ -9651,6 +9698,7 @@ async function executeComposeFanOutNode(
         totalLoopIterations: 0,
         stepNamePrefix: instanceStepNamePrefix,
         loopGroupPath: ctx.loopGroupPath,
+        activeLifecycleAttempts: ctx.activeLifecycleAttempts,
       };
       try {
         await runLayers(instanceCtx);
@@ -10045,6 +10093,23 @@ interface RunLayersContext extends RunInputs, RunDerived {
    * (top-level exec nodes have no loop user input).
    */
   bodyLoopUserInput?: string;
+  /** Latest started lifecycle attempt for each fully-qualified step name. Shared by nested
+   * contexts so the dispatcher can bind an otherwise-unhandled post-start throw to the
+   * exact AI or deterministic attempt, and can refuse a contradictory second terminal. */
+  activeLifecycleAttempts: Map<string, { data: Record<string, unknown>; terminalWritten: boolean }>;
+}
+
+function markLifecycleTerminal(ctx: RunLayersContext, stepName: string): void {
+  const attempt = ctx.activeLifecycleAttempts.get(stepName);
+  if (attempt !== undefined) attempt.terminalWritten = true;
+}
+
+function registerLifecycleAttempt(
+  ctx: RunLayersContext,
+  stepName: string,
+  data: Record<string, unknown>
+): void {
+  ctx.activeLifecycleAttempts.set(stepName, { data, terminalWritten: false });
 }
 
 function authBindingEventData(context: NodeAuthContextV1): Record<string, unknown> {
@@ -10092,6 +10157,10 @@ async function persistAiNodeAuthContext(params: {
       `Node '${params.identity.authoredNodeId}' could not claim a durable authentication context because the workflow is no longer running`
     );
   }
+  registerLifecycleAttempt(params.ctx, params.stepName, {
+    ...lifecycleEventData(params.identity),
+    ...authBindingEventData(context),
+  });
   return context;
 }
 
@@ -10654,21 +10723,13 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
                         ctx.config.protectedCredentialValues,
                         ctx.stepNamePrefix,
                         iteration,
-                        ctx.bodyLoopUserInput ?? ''
+                        ctx.bodyLoopUserInput ?? '',
+                        () => checkoutMutationViolation(node, ctx.cwd, excludes, treeBefore)
                       )
                   );
                   return {
                     nodeId: node.id,
-                    output: await assertCheckoutUntouched(
-                      node,
-                      ctx.cwd,
-                      excludes,
-                      treeBefore,
-                      output,
-                      ctx.deps,
-                      ctx.workflowRun.id,
-                      ctx.stepNamePrefix + node.id
-                    ),
+                    output,
                   };
                 }
                 // Script dispatch — runs via bun or uv. Same opt-in retry rule as bash
@@ -10696,21 +10757,13 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
                       ctx.config.protectedCredentialValues,
                       ctx.stepNamePrefix,
                       iteration,
-                      ctx.bodyLoopUserInput ?? ''
+                      ctx.bodyLoopUserInput ?? '',
+                      () => checkoutMutationViolation(node, ctx.cwd, excludes, treeBefore)
                     )
                 );
                 return {
                   nodeId: node.id,
-                  output: await assertCheckoutUntouched(
-                    node,
-                    ctx.cwd,
-                    excludes,
-                    treeBefore,
-                    output,
-                    ctx.deps,
-                    ctx.workflowRun.id,
-                    ctx.stepNamePrefix + node.id
-                  ),
+                  output,
                 };
               }
 
@@ -11040,9 +11093,9 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
             // 6. Execute with retry for transient failures. AI nodes get the
             // default 2 transient retries; the shared loop applies the same
             // backoff + FATAL-never-retried semantics as deterministic nodes.
-            // `mutates_checkout: false` (#2771) is asserted OUTSIDE the retry loop:
-            // the snapshot covers every attempt, and a violation fails the node
-            // without offering retry another chance to mutate.
+            // `mutates_checkout: false` (#2771) snapshots outside the retry loop, then
+            // checks inside the successful attempt before its terminal event. The
+            // violation is non-retryable, so no later attempt can multiply the damage.
             const checkoutExcludes = checkoutSnapshotExcludes(
               ctx.artifactsDir,
               ctx.stateDir,
@@ -11073,20 +11126,12 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
                   resolvedEffort,
                   ctx.stepNamePrefix,
                   iteration,
-                  checkpointSessionForProvider(provider)
+                  checkpointSessionForProvider(provider),
+                  () => checkoutMutationViolation(node, ctx.cwd, checkoutExcludes, treeBefore)
                 ),
               { state: 'failed', output: '', error: 'Node did not execute' } as NodeExecutionResult
             );
-            const output = await assertCheckoutUntouched(
-              node,
-              ctx.cwd,
-              checkoutExcludes,
-              treeBefore,
-              retriedOutput,
-              ctx.deps,
-              ctx.workflowRun.id,
-              ctx.stepNamePrefix + node.id
-            );
+            const output = retriedOutput;
 
             // Cold-resume surfacing: this node requested a session resume but the
             // provider reported it came back cold (resumed === false) — the prior
@@ -11190,27 +11235,36 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
 
             const err = error as Error;
             getLog().error({ err, nodeId: node.id }, 'dag_node_pre_execution_failed');
-            ctx.deps.store
-              .createWorkflowEvent({
-                workflow_run_id: ctx.workflowRun.id,
-                event_type: 'node_failed',
-                step_name: ctx.stepNamePrefix + node.id,
-                data: nodeFailureData(err.message, {
-                  ...(isNodeContextResume(node.context)
-                    ? { session_source_node_id: node.context.resume }
-                    : {}),
-                }),
-              })
-              .catch((dbErr: Error) => {
-                getLog().error({ err: dbErr, nodeId: node.id }, 'workflow_event_persist_failed');
+            const stepName = ctx.stepNamePrefix + node.id;
+            const activeAttempt = ctx.activeLifecycleAttempts.get(stepName);
+            if (activeAttempt?.terminalWritten !== true) {
+              if (activeAttempt !== undefined) activeAttempt.terminalWritten = true;
+              const terminalIdentity =
+                activeAttempt?.data ??
+                lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
+              ctx.deps.store
+                .createWorkflowEvent({
+                  workflow_run_id: ctx.workflowRun.id,
+                  event_type: 'node_failed',
+                  step_name: stepName,
+                  data: nodeFailureData(err.message, {
+                    ...terminalIdentity,
+                    ...(isNodeContextResume(node.context)
+                      ? { session_source_node_id: node.context.resume }
+                      : {}),
+                  }),
+                })
+                .catch((dbErr: Error) => {
+                  getLog().error({ err: dbErr, nodeId: node.id }, 'workflow_event_persist_failed');
+                });
+              getWorkflowEventEmitter().emit({
+                type: 'node_failed',
+                runId: ctx.workflowRun.id,
+                nodeId: node.id,
+                nodeName: nodeDisplayName(node),
+                error: err.message,
               });
-            getWorkflowEventEmitter().emit({
-              type: 'node_failed',
-              runId: ctx.workflowRun.id,
-              nodeId: node.id,
-              nodeName: nodeDisplayName(node),
-              error: err.message,
-            });
+            }
             await safeSendMessage(
               ctx.platform,
               ctx.conversationId,
@@ -12143,6 +12197,7 @@ export async function executeDagWorkflow(
     totalLoopIterations: 0,
     stepNamePrefix: '',
     loopGroupPath: [],
+    activeLifecycleAttempts: new Map(),
   };
 
   /**

@@ -415,8 +415,8 @@ function deliveredMessages(platform: MockWorkflowPlatform): string[] {
 }
 
 /** The workflow events the run persisted, in call order. */
-function persistedEvents(store: MockWorkflowStore) {
-  return store.createWorkflowEvent.mock.calls.map(([event]) => event);
+function persistedEvents(store: IWorkflowStore) {
+  return (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls.map(([event]) => event);
 }
 
 const minimalConfig: WorkflowConfig = {
@@ -4080,6 +4080,92 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
       expect(store.failWorkflowRun).toHaveBeenCalled();
     });
   }
+
+  it('binds a post-auth output-reference failure to the same AI attempt without calling the provider', async () => {
+    const deps = createMockDeps();
+    mockSendQueryDag.mockClear();
+    await executeDagWorkflow(
+      dagOptions({
+        deps,
+        cwd: testDir,
+        workflow: {
+          name: 'post-auth-output-ref',
+          nodes: [
+            { id: 'producer', kind: 'exec', runtime: 'sh', script: 'echo not-json' },
+            {
+              id: 'consumer',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'Use $producer.output.missing' },
+              depends_on: ['producer'],
+              retry: { max_attempts: 0 },
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('post-auth-output-ref'),
+      })
+    );
+
+    const lifecycle = persistedEvents(deps.store).filter(
+      event =>
+        event.step_name === 'consumer' &&
+        ['node_auth_context_v1', 'node_started', 'node_completed', 'node_failed'].includes(
+          event.event_type
+        )
+    );
+    expect(lifecycle.map(event => event.event_type)).toEqual([
+      'node_auth_context_v1',
+      'node_started',
+      'node_failed',
+    ]);
+    expect(new Set(lifecycle.map(event => event.data?.node_id)).size).toBe(1);
+    expect(lifecycle.every(event => event.data?.authored_node_id === 'consumer')).toBe(true);
+    expect(
+      lifecycle
+        .filter(event => event.event_type !== 'node_auth_context_v1')
+        .every(event => event.data?.ai_node === true)
+    ).toBe(true);
+    expect(mockSendQueryDag).not.toHaveBeenCalled();
+  });
+
+  it('binds a post-auth provider-resolution throw to the same AI attempt', async () => {
+    mockGetAgentProviderDag.mockImplementation(() => {
+      throw new Error('provider registry unavailable');
+    });
+    const deps = createMockDeps();
+    await executeDagWorkflow(
+      dagOptions({
+        deps,
+        cwd: testDir,
+        workflow: {
+          name: 'post-auth-provider-resolution',
+          nodes: [
+            {
+              id: 'consumer',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'work' },
+              retry: { max_attempts: 0 },
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('post-auth-provider-resolution'),
+      })
+    );
+
+    const lifecycle = persistedEvents(deps.store).filter(
+      event =>
+        event.step_name === 'consumer' &&
+        ['node_auth_context_v1', 'node_started', 'node_completed', 'node_failed'].includes(
+          event.event_type
+        )
+    );
+    expect(lifecycle.map(event => event.event_type)).toEqual([
+      'node_auth_context_v1',
+      'node_started',
+      'node_failed',
+    ]);
+    expect(new Set(lifecycle.map(event => event.data?.node_id)).size).toBe(1);
+    expect(lifecycle[2]?.data?.error).toContain('provider registry unavailable');
+  });
 
   it('rebuilds strict Codex launch isolation for the remaining node on resume', async () => {
     mockGetAgentProviderDag.mockImplementation(() => ({
@@ -15088,6 +15174,11 @@ describe('executeDagWorkflow -- durable wait node', () => {
       expect.objectContaining({
         stepName: 'rerun-ci',
         result: expect.objectContaining({ status: 'satisfied' }),
+        lifecycleData: expect.objectContaining({
+          node_id: expect.any(String),
+          authored_node_id: 'rerun-ci',
+          ai_node: false,
+        }),
       })
     );
   });
@@ -15128,6 +15219,11 @@ describe('executeDagWorkflow -- durable wait node', () => {
       expect.objectContaining({
         stepName: 'ci',
         result: expect.objectContaining({ status: 'expired' }),
+        lifecycleData: expect.objectContaining({
+          node_id: expect.any(String),
+          authored_node_id: 'ci',
+          ai_node: false,
+        }),
       })
     );
   });
@@ -24936,7 +25032,13 @@ describe('executeDagWorkflow -- loop_group body step_name namespacing (#2090)', 
     expect(persistedEvents(store).some(e => e.step_name === 'work')).toBe(false);
 
     // The group node's OWN events keep the bare group id (they are not body events).
-    expect(eventsWith(store, 'node_completed', 'fixer').length).toBeGreaterThanOrEqual(1);
+    const groupCompleted = eventsWith(store, 'node_completed', 'fixer');
+    expect(groupCompleted.length).toBeGreaterThanOrEqual(1);
+    expect(groupCompleted[0]?.data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'fixer',
+      ai_node: false,
+    });
     expect(eventsWith(store, 'loop_iteration_started', 'fixer').length).toBe(2);
 
     // Top-level node keeps its bare id and carries no `iteration` tag.
@@ -32808,6 +32910,11 @@ describe('executeDagWorkflow -- composed fan-out (include + fan_out, #2512)', ()
     // Ordered aggregate on the wrapper node.
     const wrapper = events.find(e => e.event_type === 'node_completed' && e.step_name === 'fan');
     expect(wrapper).toBeDefined();
+    expect(wrapper?.data).toMatchObject({
+      node_id: expect.any(String),
+      authored_node_id: 'fan',
+      ai_node: false,
+    });
     expect(wrapper?.data.structured_output).toEqual(['done-a', 'done-b']);
     expect(JSON.parse(String(wrapper?.data.node_output))).toEqual(['done-a', 'done-b']);
   });
@@ -34507,6 +34614,66 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
     expect(error).toContain('guarded');
     expect(error).toContain('mutates_checkout: false');
     expect(error).toContain('stray.txt');
+    const lifecycle = persistedEvents(deps.store).filter(
+      event =>
+        event.step_name === 'guarded' &&
+        ['node_started', 'node_completed', 'node_failed'].includes(event.event_type)
+    );
+    expect(lifecycle.map(event => event.event_type)).toEqual(['node_started', 'node_failed']);
+    expect(lifecycle[0]?.data?.node_id).toBeString();
+    expect(lifecycle[1]?.data?.node_id).toBe(lifecycle[0]?.data?.node_id);
+    expect(lifecycle.every(event => event.data?.authored_node_id === 'guarded')).toBe(true);
+    expect(lifecycle.every(event => event.data?.ai_node === false)).toBe(true);
+  });
+
+  it('an AI read-only violation closes the authenticated attempt with one bound failure', async () => {
+    await initRepo(testDir);
+    mockSendQueryDag.mockImplementation(async function* () {
+      await Bun.write(join(testDir, 'ai-stray.txt'), 'x');
+      yield { type: 'assistant', content: 'done' };
+      yield { type: 'result', sessionId: 'ai-mutator' };
+    });
+    const deps = createMockDeps();
+    await executeDagWorkflow(
+      dagOptions({
+        deps,
+        cwd: testDir,
+        workflow: {
+          name: 'mc-ai-test',
+          nodes: [
+            {
+              id: 'guarded-ai',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'work' },
+              mutates_checkout: false,
+              retry: { max_attempts: 2, delay_ms: 1 },
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('mc-ai-run'),
+      })
+    );
+
+    const lifecycle = persistedEvents(deps.store).filter(
+      event =>
+        event.step_name === 'guarded-ai' &&
+        ['node_auth_context_v1', 'node_started', 'node_completed', 'node_failed'].includes(
+          event.event_type
+        )
+    );
+    expect(lifecycle.map(event => event.event_type)).toEqual([
+      'node_auth_context_v1',
+      'node_started',
+      'node_failed',
+    ]);
+    expect(new Set(lifecycle.map(event => event.data?.node_id)).size).toBe(1);
+    expect(lifecycle.every(event => event.data?.authored_node_id === 'guarded-ai')).toBe(true);
+    expect(
+      lifecycle
+        .filter(event => event.event_type !== 'node_auth_context_v1')
+        .every(event => event.data?.ai_node === true)
+    ).toBe(true);
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
   });
 
   it('an undeclared mutating node is not checked', async () => {

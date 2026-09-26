@@ -916,6 +916,11 @@ describe('workflows database', () => {
         clearWorkflowWaitContext('workflow-run-123', wait, {
           stepName: 'await-ci',
           result: { status: 'satisfied', waited_ms: 1000 },
+          lifecycleData: {
+            node_id: 'wait-attempt-1',
+            authored_node_id: 'await-ci',
+            ai_node: false,
+          },
         })
       ).resolves.toEqual({ cleared: true });
       const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
@@ -926,6 +931,12 @@ describe('workflows database', () => {
       expect(params).toEqual(['workflow-run-123', 'await-ci', wait.resumeAt]);
       expect(mockQuery.mock.calls[1]?.[0]).toContain('INSERT INTO remote_agent_workflow_events');
       expect(mockQuery.mock.calls[2]?.[0]).toContain('INSERT INTO remote_agent_workflow_events');
+      const completedEventParams = mockQuery.mock.calls[2]?.[1] as unknown[] | undefined;
+      expect(JSON.parse(String(completedEventParams?.[5]))).toMatchObject({
+        node_id: 'wait-attempt-1',
+        authored_node_id: 'await-ci',
+        ai_node: false,
+      });
     });
 
     test('keys action-required wait consumption to its waiting timestamp', async () => {
@@ -944,6 +955,11 @@ describe('workflows database', () => {
         clearWorkflowWaitContext('workflow-run-123', attentionWait, {
           stepName: 'rerun-ci',
           result: { status: 'satisfied', waited_ms: 1000 },
+          lifecycleData: {
+            node_id: 'wait-attempt-2',
+            authored_node_id: 'rerun-ci',
+            ai_node: false,
+          },
         })
       ).resolves.toEqual({ cleared: true });
 

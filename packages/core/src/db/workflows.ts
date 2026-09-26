@@ -1580,6 +1580,7 @@ export async function clearWorkflowWaitContext(
         event_type: 'node_completed',
         step_name: completion.stepName,
         data: {
+          ...completion.lifecycleData,
           type: 'wait',
           duration_ms: completion.result.waited_ms,
           node_output: JSON.stringify(completion.result),
