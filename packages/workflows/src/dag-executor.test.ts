@@ -3880,6 +3880,36 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
         total_cache_write_tokens: 0,
       },
     ]);
+    const lifecycle = persistedEvents(mockDeps.store).filter(
+      event =>
+        event.step_name === 'my-node' &&
+        ['node_auth_context_v1', 'node_started', 'node_failed', 'node_completed'].includes(
+          event.event_type
+        )
+    );
+    expect(lifecycle.map(event => event.event_type)).toEqual([
+      'node_auth_context_v1',
+      'node_started',
+      'node_failed',
+      'node_auth_context_v1',
+      'node_started',
+      'node_completed',
+    ]);
+    const firstNodeId = lifecycle[0]?.data?.node_id;
+    const secondNodeId = lifecycle[3]?.data?.node_id;
+    expect(firstNodeId).toBeString();
+    expect(secondNodeId).toBeString();
+    expect(secondNodeId).not.toBe(firstNodeId);
+    expect(lifecycle.slice(0, 3).map(event => event.data?.node_id)).toEqual([
+      firstNodeId,
+      firstNodeId,
+      firstNodeId,
+    ]);
+    expect(lifecycle.slice(3).map(event => event.data?.node_id)).toEqual([
+      secondNodeId,
+      secondNodeId,
+      secondNodeId,
+    ]);
   }, 5_000);
 
   it('re-applies strict Claude launch isolation on every retry without leaking the token', async () => {
@@ -3894,9 +3924,10 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
       yield { type: 'result', sessionId: 'strict-claude-retry' };
     });
 
+    const deps = createMockDeps();
     await executeDagWorkflow(
       dagOptions({
-        deps: createMockDeps(),
+        deps,
         cwd: testDir,
         workflow: {
           name: 'strict-claude-retry',
@@ -3988,7 +4019,67 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
       expect(JSON.stringify(options.providerLaunchAttestation)).not.toContain(token);
       expect(JSON.stringify(options.providerLaunchAttestation)).not.toContain('/run/claude-config');
     }
+    const authContexts = persistedEvents(deps.store).filter(
+      event => event.event_type === 'node_auth_context_v1'
+    );
+    expect(authContexts).toHaveLength(2);
+    for (const event of authContexts) {
+      expect(event.data?.billing).toEqual({
+        class: 'subscription',
+        claim: 'unverified',
+        basis: 'strict_subscription_policy',
+      });
+      expect(event.data?.credential).toMatchObject({
+        mode: 'strict_subscription',
+        values_recorded: false,
+      });
+      expect(JSON.stringify(event.data)).not.toContain(token);
+      expect(JSON.stringify(event.data)).not.toContain('/run/claude-config');
+    }
   });
+
+  for (const failureMode of ['throw', 'not-running'] as const) {
+    it(`does not call the provider or write node_started when auth context persistence ${failureMode === 'throw' ? 'throws' : 'loses the run claim'}`, async () => {
+      const store = createMockStore();
+      store.persistWorkflowEventIfRunning.mockImplementation(async event => {
+        if (event.event_type !== 'node_auth_context_v1') {
+          await store.createWorkflowEvent(event);
+          return { persisted: true };
+        }
+        if (failureMode === 'throw') throw new Error('auth event store unavailable');
+        return { persisted: false };
+      });
+      const deps = createMockDeps(store);
+
+      await executeDagWorkflow(
+        dagOptions({
+          deps,
+          cwd: testDir,
+          workflow: {
+            name: `auth-context-${failureMode}`,
+            nodes: [
+              {
+                id: 'protected-node',
+                kind: 'agent',
+                source: { kind: 'command', name: 'my-cmd' },
+                retry: { max_attempts: 0 },
+              },
+            ],
+          },
+          workflowRun: makeWorkflowRun(`auth-context-${failureMode}`),
+        })
+      );
+
+      expect(mockGetAgentProviderDag).not.toHaveBeenCalled();
+      expect(mockSendQueryDag).not.toHaveBeenCalled();
+      expect(
+        persistedEvents(store).filter(
+          event => event.event_type === 'node_started' && event.step_name === 'protected-node'
+        )
+      ).toHaveLength(0);
+      expect(store.failWorkflowRun).toHaveBeenCalled();
+    });
+  }
 
   it('rebuilds strict Codex launch isolation for the remaining node on resume', async () => {
     mockGetAgentProviderDag.mockImplementation(() => ({
@@ -15365,6 +15456,18 @@ describe('executeDagWorkflow -- approval node', () => {
     // distinct ID 'review:on_reject'. This ensures the synthetic node itself is
     // recorded as completed so it is not re-run on a subsequent resume.
     expect(completedStepNames.filter((n: unknown) => n === 'review:on_reject').length).toBe(1);
+    const syntheticLifecycle = persistedEvents(store).filter(
+      event =>
+        event.step_name === 'review:on_reject' &&
+        ['node_auth_context_v1', 'node_started', 'node_completed'].includes(event.event_type)
+    );
+    expect(syntheticLifecycle.map(event => event.event_type)).toEqual([
+      'node_auth_context_v1',
+      'node_started',
+      'node_completed',
+    ]);
+    expect(new Set(syntheticLifecycle.map(event => event.data?.node_id)).size).toBe(1);
+    expect(syntheticLifecycle[0]?.data?.authored_node_id).toBe('review:on_reject');
   });
 
   it('on_reject cancels when max_attempts exhausted', async () => {
@@ -24812,6 +24915,22 @@ describe('executeDagWorkflow -- loop_group body step_name namespacing (#2090)', 
     // Each body lifecycle event carries the iteration it ran in.
     expect(bodyStarted.map(e => e.data?.iteration).sort()).toEqual([1, 2]);
     expect(bodyCompleted.map(e => e.data?.iteration).sort()).toEqual([1, 2]);
+    expect(new Set(bodyStarted.map(e => e.data?.node_id)).size).toBe(2);
+    for (const started of bodyStarted) {
+      expect(started.data).toMatchObject({ ai_node: true, authored_node_id: 'work' });
+      const authIndex = persistedEvents(store).findIndex(
+        event =>
+          event.event_type === 'node_auth_context_v1' &&
+          event.step_name === 'fixer.work' &&
+          event.data?.node_id === started.data?.node_id
+      );
+      const startIndex = persistedEvents(store).indexOf(started);
+      expect(authIndex).toBeGreaterThanOrEqual(0);
+      expect(authIndex).toBeLessThan(startIndex);
+      expect(
+        bodyCompleted.some(completed => completed.data?.node_id === started.data?.node_id)
+      ).toBe(true);
+    }
 
     // The raw (un-namespaced) body id must NEVER appear as a persisted step_name.
     expect(persistedEvents(store).some(e => e.step_name === 'work')).toBe(false);
@@ -24823,6 +24942,10 @@ describe('executeDagWorkflow -- loop_group body step_name namespacing (#2090)', 
     // Top-level node keeps its bare id and carries no `iteration` tag.
     const setupStarted = eventsWith(store, 'node_started', 'setup');
     expect(setupStarted.length).toBe(1);
+    expect(setupStarted[0].data).toMatchObject({
+      ai_node: false,
+      authored_node_id: 'setup',
+    });
     expect(setupStarted[0].data?.iteration).toBeUndefined();
     expect(eventsWith(store, 'node_completed', 'setup').length).toBe(1);
   });
@@ -24907,6 +25030,14 @@ describe('executeDagWorkflow -- loop_group body step_name namespacing (#2090)', 
     ).toBeGreaterThanOrEqual(1);
     // The outer body's sibling AI node is namespaced by the outer group.
     expect(eventsWith(store, 'node_completed', 'outer.review').length).toBeGreaterThanOrEqual(1);
+    for (const stepName of ['outer.inner.leaf', 'outer.review']) {
+      const auth = eventsWith(store, 'node_auth_context_v1', stepName);
+      const started = eventsWith(store, 'node_started', stepName);
+      expect(auth).toHaveLength(1);
+      expect(started).toHaveLength(1);
+      expect(auth[0].data?.node_id).toBe(started[0].data?.node_id);
+      expect(auth[0].data?.authored_node_id).toBe(stepName.split('.').at(-1));
+    }
     // No un-namespaced leaf/review rows leak.
     expect(persistedEvents(store).some(e => e.step_name === 'leaf')).toBe(false);
     expect(persistedEvents(store).some(e => e.step_name === 'review')).toBe(false);
@@ -32659,6 +32790,21 @@ describe('executeDagWorkflow -- composed fan-out (include + fan_out, #2512)', ()
       .map(e => e.data.node_output)
       .sort();
     expect(instanceOutputs).toEqual(['done-a', 'done-b']);
+    const lifecycleStarts = events.filter(
+      event => event.event_type === 'node_started' && event.step_name.startsWith(composeScope())
+    );
+    expect(lifecycleStarts).toHaveLength(4);
+    expect(new Set(lifecycleStarts.map(event => event.data.node_id)).size).toBe(4);
+    for (const started of lifecycleStarts) {
+      expect(started.data.ai_node).toBe(false);
+      const terminal = events.find(
+        event =>
+          ['node_completed', 'node_failed'].includes(event.event_type) &&
+          event.step_name === started.step_name &&
+          event.data.node_id === started.data.node_id
+      );
+      expect(terminal).toBeDefined();
+    }
     // Ordered aggregate on the wrapper node.
     const wrapper = events.find(e => e.event_type === 'node_completed' && e.step_name === 'fan');
     expect(wrapper).toBeDefined();

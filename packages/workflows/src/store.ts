@@ -103,6 +103,9 @@ export const WORKFLOW_EVENT_TYPES = [
   // the cache was honored — a skipped node only writes `node_skipped_prior_success`.
   'node_prior_cache_invalidated',
   'node_always_run_reset',
+  // Non-secret, correctness-critical launch evidence written and awaited before
+  // an AI node's node_started event and before its provider is invoked.
+  'node_auth_context_v1',
   'loop_iteration_started',
   'loop_iteration_completed',
   'loop_iteration_failed',

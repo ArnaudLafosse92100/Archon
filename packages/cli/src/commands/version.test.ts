@@ -82,6 +82,7 @@ describe('versionCommand', () => {
     expect(JSON.parse(consoleSpy.mock.calls[0][0] as string)).toEqual(
       expect.objectContaining({
         revision,
+        capabilities: ['archon-auth-context-v1'],
         contracts: {
           'node_failed.data.error_class': {
             version: 1,

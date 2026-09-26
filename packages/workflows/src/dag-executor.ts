@@ -153,6 +153,13 @@ import { mapWithLimit } from './utils/map-with-limit';
 import { collectComposedSuspensionPaths, instantiateResolvedInclude } from './include-expander';
 import { buildInstanceSnapshots, composeFanOutScopeSegment } from './fan-out-identity';
 import {
+  buildNodeAuthContextV1,
+  createNodeLifecycleIdentity,
+  lifecycleEventData,
+  type NodeAuthContextV1,
+  type NodeLifecycleIdentityV1,
+} from './node-auth-context';
+import {
   classifyError,
   currentAdoptedRunDir,
   getRetryDelayMs,
@@ -2194,6 +2201,22 @@ async function executeNodeInternal(
 
   const configuredMcpNames = await loadConfiguredMcpServerNames(node.mcp, cwd);
 
+  const lifecycleIdentity = createNodeLifecycleIdentity(node.id, true);
+  const authContext = await persistAiNodeAuthContext({
+    ctx,
+    identity: lifecycleIdentity,
+    stepName,
+    provider,
+    model: resolvedModel,
+    tier: resolvedTier,
+    effort: resolvedEffort,
+    options: nodeOptions,
+  });
+  const lifecycleData = {
+    ...lifecycleEventData(lifecycleIdentity),
+    ...authBindingEventData(authContext),
+  };
+
   getLog().info({ nodeId: node.id, provider }, 'dag_node_started');
   await logNodeStart(logDir, workflowRun.id, node.id, commandName ?? '<inline>');
 
@@ -2203,6 +2226,7 @@ async function executeNodeInternal(
       event_type: 'node_started',
       step_name: stepName,
       data: {
+        ...lifecycleData,
         command: commandName ?? null,
         provider,
         model: resolvedModel,
@@ -2256,6 +2280,7 @@ async function executeNodeInternal(
         event_type: 'node_failed',
         step_name: stepName,
         data: nodeFailureData(error, {
+          ...lifecycleData,
           duration_ms: Date.now() - nodeStartTime,
           ...usage,
           ...namedSessionAuditData,
@@ -3266,6 +3291,7 @@ async function executeNodeInternal(
         event_type: 'node_completed',
         step_name: stepName,
         data: {
+          ...lifecycleData,
           duration_ms: duration,
           node_output: nodeOutputText,
           // The logical value beside its text (#2637), so a cold resume rehydrates
@@ -3716,7 +3742,8 @@ async function recordExecTimeoutSkip(
   node: ExecNode,
   nodeType: 'bash' | 'script',
   stepName: string,
-  iterationData: { iteration?: number }
+  iterationData: { iteration?: number },
+  lifecycleData: Record<string, unknown>
 ): Promise<NodeOutput> {
   const cause: SkipCause = { kind: 'timeout' };
   getLog().info({ nodeId: node.id, nodeType }, 'dag_node_skipped_timeout');
@@ -3732,7 +3759,7 @@ async function recordExecTimeoutSkip(
       workflow_run_id: ctx.workflowRun.id,
       event_type: 'node_skipped',
       step_name: stepName,
-      data: { reason: 'timeout', cause, type: nodeType, ...iterationData },
+      data: { ...lifecycleData, reason: 'timeout', cause, type: nodeType, ...iterationData },
     })
     .catch((err: Error) => {
       getLog().error(
@@ -3889,6 +3916,7 @@ async function executeBashNode(
   // Namespaced persisted step_name for loop_group bodies ('' → node.id at top level, #2090).
   const stepName = stepNamePrefix + node.id;
   const iterationData = iteration !== undefined ? { iteration } : {};
+  const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
 
   getLog().info({ nodeId: node.id, type: 'bash' }, 'dag_node_started');
   await logNodeStart(logDir, workflowRun.id, node.id, '<bash>');
@@ -3898,7 +3926,7 @@ async function executeBashNode(
       workflow_run_id: workflowRun.id,
       event_type: 'node_started',
       step_name: stepName,
-      data: { type: 'bash', ...iterationData },
+      data: { ...lifecycleData, type: 'bash', ...iterationData },
     })
     .catch((err: Error) => {
       getLog().error(
@@ -4024,6 +4052,7 @@ async function executeBashNode(
         event_type: 'node_completed',
         step_name: stepName,
         data: {
+          ...lifecycleData,
           duration_ms: duration,
           type: 'bash',
           ...persistedOutputEventFields(persistedOutput, 'node_output'),
@@ -4067,7 +4096,7 @@ async function executeBashNode(
     const contractFailure = error instanceof ExecOutputContractError;
     const isTimeout = !contractFailure && isSubprocessTimeout(err);
     if (isTimeout && node.on_timeout === 'skip') {
-      return recordExecTimeoutSkip(ctx, node, 'bash', stepName, iterationData);
+      return recordExecTimeoutSkip(ctx, node, 'bash', stepName, iterationData, lifecycleData);
     }
     const label = `Bash node '${node.id}'`;
     // Always run the formatter so logs get sanitized fields regardless of which
@@ -4101,7 +4130,7 @@ async function executeBashNode(
         workflow_run_id: workflowRun.id,
         event_type: 'node_failed',
         step_name: stepName,
-        data: nodeFailureData(errorMsg, { type: 'bash' }),
+        data: nodeFailureData(errorMsg, { ...lifecycleData, type: 'bash' }),
       })
       .catch((dbErr: Error) => {
         getLog().error(
@@ -4214,6 +4243,7 @@ async function executeScriptNode(
   // Namespaced persisted step_name for loop_group bodies ('' → node.id at top level, #2090).
   const stepName = stepNamePrefix + node.id;
   const iterationData = iteration !== undefined ? { iteration } : {};
+  const lifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
 
   getLog().info({ nodeId: node.id, type: 'script', runtime: node.runtime }, 'dag_node_started');
   await logNodeStart(logDir, workflowRun.id, node.id, '<script>');
@@ -4223,7 +4253,7 @@ async function executeScriptNode(
       workflow_run_id: workflowRun.id,
       event_type: 'node_started',
       step_name: stepName,
-      data: { type: 'script', runtime: node.runtime, ...iterationData },
+      data: { ...lifecycleData, type: 'script', runtime: node.runtime, ...iterationData },
     })
     .catch((err: Error) => {
       getLog().error(
@@ -4359,7 +4389,7 @@ async function executeScriptNode(
             workflow_run_id: workflowRun.id,
             event_type: 'node_failed',
             step_name: stepName,
-            data: nodeFailureData(errorMsg, { type: 'script' }),
+            data: nodeFailureData(errorMsg, { ...lifecycleData, type: 'script' }),
           })
           .catch((dbErr: Error) => {
             getLog().error(
@@ -4390,7 +4420,7 @@ async function executeScriptNode(
             workflow_run_id: workflowRun.id,
             event_type: 'node_failed',
             step_name: stepName,
-            data: nodeFailureData(errorMsg, { type: 'script' }),
+            data: nodeFailureData(errorMsg, { ...lifecycleData, type: 'script' }),
           })
           .catch((dbErr: Error) => {
             getLog().error(
@@ -4458,6 +4488,7 @@ async function executeScriptNode(
         event_type: 'node_completed',
         step_name: stepName,
         data: {
+          ...lifecycleData,
           duration_ms: duration,
           type: 'script',
           ...persistedOutputEventFields(persistedOutput, 'node_output'),
@@ -4499,7 +4530,7 @@ async function executeScriptNode(
     const contractFailure = error instanceof ExecOutputContractError;
     const isTimeout = !contractFailure && isSubprocessTimeout(err);
     if (isTimeout && node.on_timeout === 'skip') {
-      return recordExecTimeoutSkip(ctx, node, 'script', stepName, iterationData);
+      return recordExecTimeoutSkip(ctx, node, 'script', stepName, iterationData, lifecycleData);
     }
     const label = `Script node '${node.id}'`;
     // Always run the formatter so logs get sanitized fields regardless of which
@@ -4530,7 +4561,7 @@ async function executeScriptNode(
         workflow_run_id: workflowRun.id,
         event_type: 'node_failed',
         step_name: stepName,
-        data: nodeFailureData(errorMsg, { type: 'script' }),
+        data: nodeFailureData(errorMsg, { ...lifecycleData, type: 'script' }),
       })
       .catch((dbErr: Error) => {
         getLog().error(
@@ -4695,7 +4726,8 @@ async function finalizeLoopFromSignal(
   nodeLabel: string,
   finalizeOutput: string,
   finalizeUsage?: { costUsd?: number; tokens?: TokenUsage },
-  finalizeStructuredOutput?: unknown
+  finalizeStructuredOutput?: unknown,
+  lifecycleData?: Record<string, unknown>
 ): Promise<void> {
   // Impossible by construction today (the gate writes signaledOutput whenever
   // completionSignaled is true) — this warn guards a future decoupling so a
@@ -4718,6 +4750,7 @@ async function finalizeLoopFromSignal(
       event_type: 'node_completed',
       step_name: stepName,
       data: {
+        ...(lifecycleData ?? {}),
         duration_ms: 0,
         node_output: finalizeOutput,
         ...(finalizeStructuredOutput !== undefined
@@ -5887,6 +5920,21 @@ async function executeLoopNode(
   // ('' → node.id at top level, #2090). The loop's own per-iteration number lives in
   // each event's data (`iteration`), so no separate iteration param is threaded here.
   const stepName = stepNamePrefix + node.id;
+  const lifecycleIdentity = createNodeLifecycleIdentity(node.id, true);
+  const authContext = await persistAiNodeAuthContext({
+    ctx,
+    identity: lifecycleIdentity,
+    stepName,
+    provider: workflowProvider,
+    model: resolvedModel,
+    tier: resolvedTier,
+    effort: resolvedEffort,
+    options: resolvedOptions,
+  });
+  const lifecycleData = {
+    ...lifecycleEventData(lifecycleIdentity),
+    ...authBindingEventData(authContext),
+  };
 
   // Emit node_started up-front so every terminal outcome of this loop node is
   // paired with a corresponding _started event — same pattern the bash and
@@ -5907,6 +5955,7 @@ async function executeLoopNode(
       event_type: 'node_started',
       step_name: stepName,
       data: {
+        ...lifecycleData,
         type: 'loop',
         command: loop.command ?? null,
         // Requested-model attribution, same fields the AI-node path records
@@ -5969,6 +6018,7 @@ async function executeLoopNode(
         event_type: 'node_failed',
         step_name: stepName,
         data: nodeFailureData(error, {
+          ...lifecycleData,
           ...loopUsage,
           ...(extras.data ?? {}),
         }),
@@ -6043,7 +6093,8 @@ async function executeLoopNode(
         ...(persistedLoopCostUsd !== undefined ? { costUsd: persistedLoopCostUsd } : {}),
         ...(persistedLoopTokens !== undefined ? { tokens: persistedLoopTokens } : {}),
       },
-      finalizeStructured ?? undefined
+      finalizeStructured ?? undefined,
+      lifecycleData
     );
     // Same declared-field capture as the normal completion return below and as the
     // resume-hydration path (#2091). This is a COMPLETION exit, so a consumer's
@@ -6114,7 +6165,7 @@ async function executeLoopNode(
     loopPromptTemplate = loop.prompt;
   } else {
     // Unreachable: superRefine on loopNodeConfigSchema enforces exactly-one.
-    throw new Error(
+    return failLoopNode(
       `Loop node '${node.id}' has neither 'loop.prompt' nor 'loop.command' — schema invariant violated`
     );
   }
@@ -7104,10 +7155,10 @@ async function executeLoopNode(
     // until #2563; do not "fix" the asymmetry back.
     let bashComplete = false;
     if (loop.until_bash && !signalDetected && !fieldComplete) {
-      // Resolve outside the try so ARCHON_BASH_PATH validation errors bubble up
-      // to the caller instead of being swallowed by the per-iteration catch.
-      const loopBashPath = resolveBashPath();
+      // Resolve inside this terminal-owning boundary: configuration and process-launch
+      // errors fail the loop through failLoopNode, preserving its lifecycle identity.
       try {
+        const loopBashPath = resolveBashPath();
         const { prompt: bashPrompt } = substituteWorkflowVariables(
           loop.until_bash,
           workflowRun.id,
@@ -7168,10 +7219,15 @@ async function executeLoopNode(
         // out of the loop with a clear actionable error instead.
         if (bashErr.code === 'ENOENT' || bashErr.code === 'EACCES' || bashErr.code === 'ENOTDIR') {
           getLog().error({ err: bashErr, nodeId: node.id, iteration: i }, 'loop.until_bash_failed');
-          throw new Error(
+          return await failLoopNode(
             `Loop node '${node.id}' until_bash failed: cannot execute bash at ` +
-              `'${loopBashPath}' (${bashErr.code}). Set ARCHON_BASH_PATH if Git Bash ` +
-              'is installed elsewhere.'
+              `'${process.env.ARCHON_BASH_PATH ?? 'bash'}' (${bashErr.code}). Set ARCHON_BASH_PATH if Git Bash ` +
+              'is installed elsewhere.',
+            {
+              costUsd: loopTotalCostUsd,
+              ...(loopTotalTokens !== undefined ? { tokens: loopTotalTokens } : {}),
+              loopIterations: i,
+            }
           );
         }
         // Non-exec errors (resolveBashPath validation, template substitution, etc.)
@@ -7181,7 +7237,14 @@ async function executeLoopNode(
             { err: bashErr, nodeId: node.id, iteration: i },
             'loop.until_bash_unexpected_error'
           );
-          throw bashErr;
+          return await failLoopNode(
+            `Loop node '${node.id}' until_bash failed: ${bashErr.message}`,
+            {
+              costUsd: loopTotalCostUsd,
+              ...(loopTotalTokens !== undefined ? { tokens: loopTotalTokens } : {}),
+              loopIterations: i,
+            }
+          );
         }
         // Numeric exit code from the bash script = condition not met yet, keep looping.
         bashComplete = false;
@@ -7256,6 +7319,7 @@ async function executeLoopNode(
           event_type: 'node_completed',
           step_name: stepName,
           data: {
+            ...lifecycleData,
             duration_ms: Date.now() - iterationStart,
             node_output: lastIterationOutput,
             // The completing iteration's logical payload (#2637) — mirrors the
@@ -9516,6 +9580,7 @@ async function executeComposeFanOutNode(
             : {}),
         });
       }
+      const instanceLifecycleData = lifecycleEventData(createNodeLifecycleIdentity(node.id, false));
       try {
         const claim = await deps.store.persistWorkflowEventIfRunning(
           {
@@ -9523,6 +9588,7 @@ async function executeComposeFanOutNode(
             event_type: 'node_started',
             step_name: instanceScopeName,
             data: {
+              ...instanceLifecycleData,
               type: 'compose_fan_out_instance',
               identity: snapshot.identity,
               ordinal: snapshot.ordinal,
@@ -9603,6 +9669,7 @@ async function executeComposeFanOutNode(
             event_type: 'node_failed',
             step_name: instanceScopeName,
             data: nodeFailureData(error, {
+              ...instanceLifecycleData,
               type: 'compose_fan_out_instance',
               aggregate: true,
               ...(outcome.costUsd !== undefined ? { cost_usd: outcome.costUsd } : {}),
@@ -9633,6 +9700,7 @@ async function executeComposeFanOutNode(
             event_type: 'node_failed',
             step_name: instanceScopeName,
             data: nodeFailureData(outcome.error ?? 'composed instance node failed', {
+              ...instanceLifecycleData,
               type: 'compose_fan_out_instance',
               aggregate: true,
               ...(outcome.costUsd !== undefined ? { cost_usd: outcome.costUsd } : {}),
@@ -9676,6 +9744,7 @@ async function executeComposeFanOutNode(
           event_type: 'node_completed',
           step_name: instanceScopeName,
           data: {
+            ...instanceLifecycleData,
             type: 'compose_fan_out_instance',
             aggregate: true,
             node_output: outcome.output,
@@ -9976,6 +10045,54 @@ interface RunLayersContext extends RunInputs, RunDerived {
    * (top-level exec nodes have no loop user input).
    */
   bodyLoopUserInput?: string;
+}
+
+function authBindingEventData(context: NodeAuthContextV1): Record<string, unknown> {
+  return {
+    run_id: context.run_id,
+    context_id: context.context_id,
+    context_sha256: context.context_sha256,
+    billing: context.billing.class,
+  };
+}
+
+async function persistAiNodeAuthContext(params: {
+  ctx: RunLayersContext;
+  identity: NodeLifecycleIdentityV1;
+  stepName: string;
+  provider: string;
+  model?: string;
+  tier?: TierName;
+  effort?: EffortLevel;
+  options?: SendQueryOptions;
+}): Promise<NodeAuthContextV1> {
+  const context = buildNodeAuthContextV1({
+    runId: params.ctx.workflowRun.id,
+    stepName: params.stepName,
+    identity: params.identity,
+    provider: params.provider,
+    model: params.model,
+    tier: params.tier,
+    effort: params.effort,
+    launchAttestation: params.options?.providerLaunchAttestation,
+  });
+  const claim = await params.ctx.deps.store.persistWorkflowEventIfRunning(
+    {
+      workflow_run_id: params.ctx.workflowRun.id,
+      event_type: 'node_auth_context_v1',
+      step_name: params.stepName,
+      data: { ...context },
+    },
+    {
+      allowPaused: params.ctx.claimedWorkPausePolicy === 'finish_through_parent_pause',
+    }
+  );
+  if (!claim.persisted) {
+    throw new Error(
+      `Node '${params.identity.authoredNodeId}' could not claim a durable authentication context because the workflow is no longer running`
+    );
+  }
+  return context;
 }
 
 /**
