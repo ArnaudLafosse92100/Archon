@@ -71,6 +71,16 @@ mock.module('./openai-oauth', () => ({
     newCredentials: creds,
     apiKey: 'k',
   }),
+  hasCompleteOpenAiOAuthCredentials: (creds: Record<string, unknown>) =>
+    typeof creds.access === 'string' &&
+    creds.access.length > 0 &&
+    typeof creds.refresh === 'string' &&
+    creds.refresh.length > 0 &&
+    Number.isFinite(creds.expires) &&
+    typeof creds.accountId === 'string' &&
+    creds.accountId.length > 0 &&
+    typeof creds.id_token === 'string' &&
+    creds.id_token.length > 0,
   refreshOpenAiOAuthCredentials: async (creds: Record<string, unknown>) => creds,
 }));
 

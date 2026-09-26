@@ -249,6 +249,17 @@ describe('mintOpenAiOAuthApiKey', () => {
     expect(await mintOpenAiOAuthApiKey(corrupt)).toBeNull();
   });
 
+  test('legacy unexpired blob without id_token is unusable before delivery', async () => {
+    const legacy = {
+      access: 'a1',
+      refresh: 'r1',
+      expires: Date.now() + 60_000,
+      accountId: 'acct-42',
+    } as unknown as Parameters<typeof mintOpenAiOAuthApiKey>[0];
+
+    expect(await mintOpenAiOAuthApiKey(legacy)).toBeNull();
+  });
+
   test('expired blob → refreshes first (id_token preserved through rotation)', async () => {
     stubTokenEndpoint(200, {
       access_token: ACCESS_WITH_ACCOUNT,

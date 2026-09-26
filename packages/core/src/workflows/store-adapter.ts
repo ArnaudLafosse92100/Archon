@@ -39,6 +39,7 @@ import {
 import { listDecryptedUserProviderCredentialsWithIssues } from '../db/user-provider-key-store';
 import { getUserAiPrefs, type UserAiPrefs } from '../db/user-ai-prefs-store';
 import { sealWorkflowRunConfig, unsealWorkflowRunConfig } from '../config/run-config';
+import { hasCompleteOpenAiOAuthCredentials } from '../credentials/openai-oauth';
 
 // Compile-time assertion: MergedConfig must remain a structural subtype of WorkflowConfig.
 // If MergedConfig drifts from WorkflowConfig, this line becomes a type error.
@@ -194,18 +195,29 @@ export function createWorkflowDeps(): WorkflowDeps {
         const files: { path: string; contents: string }[] = [];
         const protectedValues = new Set<string>();
         const credentials: ProviderCredentialProvenance[] = [];
+        const credentialsForPi: typeof creds = [];
         const issues: ProviderCredentialResolutionIssue[] = resolvedCredentials.issues.map(issue =>
           issue.provider === undefined
             ? { code: issue.code }
             : { vendor: normalizeCredentialVendor(issue.provider), code: issue.code }
         );
         for (const { provider, cred } of creds) {
+          const vendor = normalizeCredentialVendor(provider);
+          if (
+            vendor === 'openai' &&
+            cred.kind === 'oauth' &&
+            !hasCompleteOpenAiOAuthCredentials(cred.rawCreds)
+          ) {
+            issues.push({ vendor, code: 'credential_unusable' });
+            continue;
+          }
+          credentialsForPi.push({ provider, cred });
           try {
             const result = deliverCredential(provider, cred, { artifactsDir });
             Object.assign(env, result.env);
             if (result.files) files.push(...result.files);
             credentials.push({
-              vendor: normalizeCredentialVendor(provider),
+              vendor,
               kind: cred.kind === 'oauth' ? 'subscription' : 'api_key',
               delivery: result.files?.length ? 'managed_file' : 'environment',
             });
@@ -223,14 +235,14 @@ export function createWorkflowDeps(): WorkflowDeps {
               { err: err as Error, userId, provider },
               'workflow_deps.provider_creds_deliver_failed'
             );
-            issues.push({ vendor: normalizeCredentialVendor(provider), code: 'delivery_failed' });
+            issues.push({ vendor, code: 'delivery_failed' });
           }
         }
         // Aggregate Pi auth.json (the user's keys + subscriptions) so a `pi` node
         // consumes them via AuthStorage(authPath) without moving Pi's home. Needs
         // a real artifactsDir (file delivery); the chat path is env-only.
         if (artifactsDir) {
-          const piAuthJson = buildPiAuthJson(creds);
+          const piAuthJson = buildPiAuthJson(credentialsForPi);
           if (piAuthJson) {
             const piAuthPath = join(artifactsDir, PI_AUTH_JSON_RELATIVE_PATH);
             files.push({ path: piAuthPath, contents: piAuthJson });

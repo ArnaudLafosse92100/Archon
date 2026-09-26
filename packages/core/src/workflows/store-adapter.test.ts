@@ -413,6 +413,38 @@ describe('createWorkflowDeps', () => {
       expect(result?.issues).toEqual([{ vendor: 'openai', code: 'credential_unusable' }]);
     });
 
+    test('getUserProviderEnv never marks an id_token-less OpenAI blob as subscription provenance', async () => {
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [
+          {
+            provider: 'openai',
+            cred: {
+              kind: 'oauth',
+              oauthApiKey: 'legacy-access',
+              rawCreds: {
+                access: 'legacy-access',
+                refresh: 'legacy-refresh',
+                expires: Date.now() + 60_000,
+                accountId: 'acct-legacy',
+              },
+            },
+          },
+        ],
+        issues: [],
+      });
+      const deps = createWorkflowDeps();
+
+      const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+
+      expect(result).toMatchObject({
+        status: 'resolved',
+        env: {},
+        files: [],
+        credentials: [],
+        issues: [{ vendor: 'openai', code: 'credential_unusable' }],
+      });
+    });
+
     test('getUserProviderEnv protects OAuth secrets without hiding public metadata', async () => {
       mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
         credentials: [

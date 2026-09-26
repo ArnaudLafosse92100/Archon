@@ -2870,7 +2870,7 @@ describe('executeWorkflow', () => {
       expect(JSON.stringify(result)).not.toContain('/private/worktree');
     });
 
-    it('fails before DAG when strict Codex policy has no usable credential', async () => {
+    it('fails before DAG when resolution rejects a legacy incomplete OpenAI credential', async () => {
       const deps: WorkflowDeps = {
         ...makeDeps(makeStore()),
         sealRunConfig: () => policyMetadata,

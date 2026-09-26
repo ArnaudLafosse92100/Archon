@@ -43,6 +43,16 @@ const mockMintOpenAi = mock(
 );
 mock.module('../credentials/openai-oauth', () => ({
   mintOpenAiOAuthApiKey: mockMintOpenAi,
+  hasCompleteOpenAiOAuthCredentials: (creds: Record<string, unknown>) =>
+    typeof creds.access === 'string' &&
+    creds.access.length > 0 &&
+    typeof creds.refresh === 'string' &&
+    creds.refresh.length > 0 &&
+    Number.isFinite(creds.expires) &&
+    typeof creds.accountId === 'string' &&
+    creds.accountId.length > 0 &&
+    typeof creds.id_token === 'string' &&
+    creds.id_token.length > 0,
 }));
 
 import { encryptToken, decryptToken, getEncryptionKey } from '../utils/token-crypto';
@@ -319,6 +329,25 @@ describe('user-provider-key-store', () => {
       expect(mockGetOAuthApiKey).not.toHaveBeenCalled();
     });
 
+    test('legacy unexpired openai row without id_token → null before delivery', async () => {
+      const legacy = {
+        access: 'oa',
+        refresh: 'or',
+        expires: Date.now() + 60_000,
+        accountId: 'acct-1',
+      };
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          oauthRow({
+            provider: 'openai',
+            oauth_creds_encrypted: encryptToken(JSON.stringify(legacy), getEncryptionKey()),
+          }),
+        ])
+      );
+
+      expect(await getDecryptedProviderCredential('user-1', 'openai')).toBeNull();
+    });
+
     test('openai oauth row → null on malformed expires, no mint attempt', async (): Promise<void> => {
       const malformedExpires = [
         { label: 'null payload', raw: 'null', type: 'undefined' },
@@ -432,6 +461,33 @@ describe('user-provider-key-store', () => {
       expect(out).toEqual({ credentials: [], issues: [{ code: 'resolution_failed' }] });
       expect(JSON.stringify(out)).not.toContain(secret);
       expect(JSON.stringify(out)).not.toContain(path);
+    });
+
+    test('classifies a legacy openai blob without id_token as credential_unusable', async () => {
+      const legacy = {
+        access: 'oa',
+        refresh: 'or',
+        expires: Date.now() + 60_000,
+        accountId: 'acct-1',
+      };
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([{ provider: 'openai', kind: 'oauth', label: 'legacy' }])
+      );
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          oauthRow({
+            provider: 'openai',
+            oauth_creds_encrypted: encryptToken(JSON.stringify(legacy), getEncryptionKey()),
+          }),
+        ])
+      );
+
+      const out = await listDecryptedUserProviderCredentialsWithIssues('user-1');
+
+      expect(out).toEqual({
+        credentials: [],
+        issues: [{ provider: 'openai', code: 'credential_unusable' }],
+      });
     });
 
     test('returns partial results (does not throw) when a per-provider fetch fails', async () => {

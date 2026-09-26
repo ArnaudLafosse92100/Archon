@@ -93,7 +93,21 @@ describe('credentials/delivery', () => {
     });
 
     test('oauth (ChatGPT subscription) → CODEX_HOME env + auth.json file under artifactsDir', () => {
-      const r = deliverCredential('openai', oauth(), { artifactsDir: ART_DIR });
+      const r = deliverCredential(
+        'openai',
+        {
+          kind: 'oauth',
+          oauthApiKey: 'oauth-bearer',
+          rawCreds: {
+            access: 'oauth-bearer',
+            refresh: 'refresh-token',
+            expires: Date.now() + 60_000,
+            accountId: 'acct-1',
+            id_token: 'id-token',
+          },
+        },
+        { artifactsDir: ART_DIR }
+      );
       expect(r.env.CODEX_HOME).toBe(join(ART_DIR, 'codex-home'));
       expect(r.files).toBeDefined();
       expect(r.files).toHaveLength(1);
@@ -138,15 +152,15 @@ describe('credentials/delivery', () => {
       });
     });
 
-    test('legacy Pi-minted blob without id_token → empty string (run fails with the known Codex error; reconnect mints a full blob)', () => {
+    test('legacy Pi-minted blob without id_token is rejected before auth.json delivery', () => {
       const cred: ResolvedCredential = {
         kind: 'oauth',
         oauthApiKey: 'x',
         rawCreds: { access: 'acc-tok', refresh: 'ref-tok', expires: 123, accountId: 'acct-9' },
       };
-      const r = deliverCredential('codex', cred, { artifactsDir: ART_DIR });
-      const parsed = JSON.parse(r.files![0]!.contents) as { tokens: Record<string, string> };
-      expect(parsed.tokens.id_token).toBe('');
+      expect(() => deliverCredential('codex', cred, { artifactsDir: ART_DIR })).toThrow(
+        'Stored OpenAI subscription credential is incomplete; reconnect required.'
+      );
     });
   });
 

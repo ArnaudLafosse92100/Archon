@@ -29,7 +29,11 @@ import {
   type ResolvedCredential,
 } from '../credentials/delivery';
 import { piOAuthProviderFor, OPENAI_SUBSCRIPTION_VENDOR } from '../credentials/oauth-providers';
-import { mintOpenAiOAuthApiKey, type OpenAiOAuthCredentials } from '../credentials/openai-oauth';
+import {
+  hasCompleteOpenAiOAuthCredentials,
+  mintOpenAiOAuthApiKey,
+  type OpenAiOAuthCredentials,
+} from '../credentials/openai-oauth';
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
@@ -247,6 +251,10 @@ async function resolveOAuthCredential(
     return null;
   }
   const rawCreds = result.newCredentials as OAuthCredentials;
+  if (vendor === OPENAI_SUBSCRIPTION_VENDOR && !hasCompleteOpenAiOAuthCredentials(rawCreds)) {
+    getLog().warn({ userId, provider }, 'user_provider_key.openai_oauth_incomplete');
+    return null;
+  }
   // Compare the meaningful fields (not JSON, which is key-order-sensitive → needless
   // writes on a reordered-but-equal blob).
   const rotated =
