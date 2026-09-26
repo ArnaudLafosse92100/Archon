@@ -28,6 +28,7 @@
  *   the SDK switched to native binaries in the 0.2.x series. See
  *   `shouldPassNoEnvFile` for the implications on the `--no-env-file` flag.
  */
+import { isAbsolute } from 'node:path';
 import {
   query,
   type Options,
@@ -45,6 +46,7 @@ import type {
   ProviderCapabilities,
   NodeConfig,
 } from '../types';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '../types';
 import { parseClaudeConfig } from './config';
 import { CLAUDE_CAPABILITIES } from './capabilities';
 import { buildContainerSpawn } from './container-spawn';
@@ -83,6 +85,69 @@ const CLAUDE_EFFORTS = [
 export type ClaudeEffortsAreComplete = AssertNever<
   Exclude<NonNullable<Options['effort']>, (typeof CLAUDE_EFFORTS)[number]>
 >;
+
+const STRICT_CLAUDE_DELIVERED_ALIASES = [
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_OAUTH_TOKEN',
+  'CLAUDE_CONFIG_DIR',
+] as const;
+
+function sameStringSet(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && expected.every(value => actual.includes(value));
+}
+
+/** Fail closed before the SDK sees a strict Claude launch. */
+export function assertStrictClaudeLaunchEnvironment(
+  requestOptions: SendQueryOptions | undefined,
+  mergedEnv: NodeJS.ProcessEnv,
+  settingSources: readonly ('project' | 'user')[]
+): void {
+  const attestation = requestOptions?.providerLaunchAttestation;
+  if (attestation?.provider !== 'claude') return;
+
+  const fail = (reason: string): never => {
+    throw new Error(`strict_claude_launch_invalid:${reason}`);
+  };
+  if (
+    attestation.envPolicy !== 'targeted_empty_overrides' ||
+    attestation.filesystemSettingsPolicy !== 'disabled'
+  ) {
+    fail('policy');
+  }
+  if (!sameStringSet(attestation.neutralizedAliases, STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS)) {
+    fail('neutralized_aliases');
+  }
+  if (!sameStringSet(attestation.deliveredAliases, STRICT_CLAUDE_DELIVERED_ALIASES)) {
+    fail('delivered_aliases');
+  }
+  for (const key of STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS) {
+    if (mergedEnv[key]) fail(`forbidden_route:${key}`);
+  }
+
+  const deliveredEnv = requestOptions?.env;
+  const claudeOauth = deliveredEnv?.CLAUDE_CODE_OAUTH_TOKEN;
+  const anthropicOauth = deliveredEnv?.ANTHROPIC_OAUTH_TOKEN;
+  if (
+    typeof claudeOauth !== 'string' ||
+    claudeOauth.length === 0 ||
+    anthropicOauth !== claudeOauth ||
+    mergedEnv.CLAUDE_CODE_OAUTH_TOKEN !== claudeOauth ||
+    mergedEnv.ANTHROPIC_OAUTH_TOKEN !== claudeOauth
+  ) {
+    fail('oauth_delivery');
+  }
+
+  const configDir = deliveredEnv?.CLAUDE_CONFIG_DIR;
+  if (
+    typeof configDir !== 'string' ||
+    !isAbsolute(configDir) ||
+    mergedEnv.CLAUDE_CONFIG_DIR !== configDir ||
+    attestation.managedPathIdentity !== 'claude-config'
+  ) {
+    fail('config_dir');
+  }
+  if (settingSources.length !== 0) fail('setting_sources');
+}
 
 /**
  * Content block type for assistant messages
@@ -1416,10 +1481,9 @@ export class ClaudeProvider implements IAgentProvider {
    * Send a query to Claude and stream responses.
    * Orchestrates option building, nodeConfig translation, streaming, and retry.
    */
-  // TODO(#1135): Pre-spawn env-leak gate was removed during provider extraction.
-  // Caller-side enforcement (orchestrator, dag-executor) is tracked in #1135.
-  // Providers must NOT implement security gates — the platform guarantees safety
-  // before a provider runs.
+  // The workflow layer prepares strict subscription launches; the provider
+  // revalidates their effective environment at the last boundary before the SDK
+  // can spawn Claude Code. Non-attested calls retain the native provider path.
   async *sendQuery(
     prompt: string,
     cwd: string,
@@ -1458,6 +1522,7 @@ export class ClaudeProvider implements IAgentProvider {
       : (requestOptions?.nodeConfig?.settingSources ??
         assistantDefaults.settingSources ??
         (['project', 'user'] as const));
+    assertStrictClaudeLaunchEnvironment(requestOptions, env, settingSources);
 
     // Apply nodeConfig translation once (deterministic, not retry-dependent)
     // We need a throwaway Options to extract warnings from applyNodeConfig,

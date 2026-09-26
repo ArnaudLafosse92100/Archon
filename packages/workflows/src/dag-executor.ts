@@ -36,7 +36,11 @@ import type {
   ExecutionContext,
   OverlayChangeSummary,
 } from '@archon/providers/types';
-import { CONTAINER_ENV_DENYLIST, mergeTokenUsage } from '@archon/providers/types';
+import {
+  CONTAINER_ENV_DENYLIST,
+  STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
+  mergeTokenUsage,
+} from '@archon/providers/types';
 import type { ContainerRunContext } from './container-context';
 import { WRITEBACK_GATE_NODE_ID } from './container-context';
 import {
@@ -1862,16 +1866,16 @@ async function resolveNodeProviderAndModel(
     // at the actual subprocess boundary without mutating process.env. The keys
     // remain present with empty values; this is not an environment allowlist.
     const sanitizedEnv: Record<string, string> = { ...config.envVars };
-    for (const key of [
-      'OPENAI_API_KEY',
-      'CODEX_API_KEY',
-      'CODEX_HOME',
-      'ANTHROPIC_API_KEY',
-      'CLAUDE_API_KEY',
-      'CLAUDE_CODE_OAUTH_TOKEN',
-      'ANTHROPIC_OAUTH_TOKEN',
-      'CLAUDE_CONFIG_DIR',
-    ]) {
+    const neutralizedKeys =
+      preparedLaunch.provider === 'claude'
+        ? [
+            ...STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            'ANTHROPIC_OAUTH_TOKEN',
+            'CLAUDE_CONFIG_DIR',
+          ]
+        : ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME'];
+    for (const key of neutralizedKeys) {
       sanitizedEnv[key] = '';
     }
     Object.assign(sanitizedEnv, preparedLaunch.deliveryEnv);

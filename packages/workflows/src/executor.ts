@@ -9,6 +9,7 @@ import {
   CLAUDE_CONFIG_RELATIVE_PATH,
   CODEX_AUTH_JSON_RELATIVE_PATH,
   MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS,
+  STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
 } from './deps';
 import type { IWorkflowPlatform, WorkflowMessageMetadata } from './deps';
 import type { PreparedProviderLaunch, StrictSubscriptionProvider, WorkflowDeps } from './deps';
@@ -459,7 +460,7 @@ async function resolveUserProviderEnvForWorkflow(
         ANTHROPIC_OAUTH_TOKEN: claudeCodeToken,
         CLAUDE_CONFIG_DIR: claudeConfigDir,
       },
-      neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+      neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
       deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
       managedPathIdentity: CLAUDE_CONFIG_RELATIVE_PATH,
       envPolicy: 'targeted_empty_overrides',

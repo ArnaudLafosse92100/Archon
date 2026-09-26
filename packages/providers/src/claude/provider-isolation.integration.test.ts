@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeProvider } from './provider';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '../types';
 
 const originalClaudeBinPath = process.env.CLAUDE_BIN_PATH;
 const originalSandbox = process.env.IS_SANDBOX;
@@ -23,6 +24,16 @@ describe('strict Claude provider launch isolation', () => {
     const fixturePath = join(root, 'claude-fixture');
     const oauthToken = 'offline-oauth-sentinel';
     const projectApiKey = 'project-api-key-must-not-win';
+    const ambientRoutes: Record<string, string> = {
+      ANTHROPIC_AUTH_TOKEN: 'ambient-auth-token-must-not-win',
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:9/exfiltration-sentinel',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      CLAUDE_CODE_USE_FOUNDRY: '1',
+    };
+    const originalAmbientRoutes = Object.fromEntries(
+      Object.keys(ambientRoutes).map(key => [key, process.env[key]])
+    );
     mkdirSync(settingsDir, { recursive: true });
     writeFileSync(
       join(settingsDir, 'settings.json'),
@@ -47,10 +58,17 @@ fs.appendFileSync(process.env.ARCHON_CAPTURE_PATH, JSON.stringify({
   args: process.argv.slice(2),
   apiKeySource: effectiveEnv.ANTHROPIC_API_KEY
     ? 'ANTHROPIC_API_KEY'
+    : effectiveEnv.ANTHROPIC_AUTH_TOKEN
+      ? 'ANTHROPIC_AUTH_TOKEN'
     : effectiveEnv.CLAUDE_CODE_OAUTH_TOKEN
       ? 'CLAUDE_CODE_OAUTH_TOKEN'
       : null,
   anthropicApiKey: effectiveEnv.ANTHROPIC_API_KEY ?? null,
+  anthropicAuthToken: effectiveEnv.ANTHROPIC_AUTH_TOKEN ?? null,
+  anthropicBaseUrl: effectiveEnv.ANTHROPIC_BASE_URL ?? null,
+  bedrock: effectiveEnv.CLAUDE_CODE_USE_BEDROCK ?? null,
+  vertex: effectiveEnv.CLAUDE_CODE_USE_VERTEX ?? null,
+  foundry: effectiveEnv.CLAUDE_CODE_USE_FOUNDRY ?? null,
   oauthToken: effectiveEnv.CLAUDE_CODE_OAUTH_TOKEN ?? null,
 }) + '\\n');
 process.exit(1);
@@ -60,6 +78,7 @@ process.exit(1);
     chmodSync(fixturePath, 0o755);
     process.env.CLAUDE_BIN_PATH = fixturePath;
     process.env.IS_SANDBOX = '1';
+    Object.assign(process.env, ambientRoutes);
 
     try {
       const provider = new ClaudeProvider({ retryBaseDelayMs: 1 });
@@ -68,9 +87,8 @@ process.exit(1);
           nodeConfig: { settingSources: ['project'] },
           assistantConfig: { settingSources: ['project', 'user'] },
           env: {
+            ...Object.fromEntries(STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS.map(key => [key, ''])),
             ARCHON_CAPTURE_PATH: capturePath,
-            ANTHROPIC_API_KEY: '',
-            CLAUDE_API_KEY: '',
             CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
             ANTHROPIC_OAUTH_TOKEN: oauthToken,
             CLAUDE_CONFIG_DIR: join(root, 'managed-claude-config'),
@@ -84,7 +102,7 @@ process.exit(1);
               kind: 'subscription',
               delivery: 'environment',
             },
-            neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+            neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
             deliveredAliases: [
               'CLAUDE_CODE_OAUTH_TOKEN',
               'ANTHROPIC_OAUTH_TOKEN',
@@ -113,10 +131,19 @@ process.exit(1);
         // Strict launches use targeted empty overrides rather than deleting the
         // inherited keys from the subprocess environment.
         expect(capture.anthropicApiKey).toBe('');
+        expect(capture.anthropicAuthToken).toBe('');
+        expect(capture.anthropicBaseUrl).toBe('');
+        expect(capture.bedrock).toBe('');
+        expect(capture.vertex).toBe('');
+        expect(capture.foundry).toBe('');
         expect(capture.oauthToken).toBe(oauthToken);
         expect(JSON.stringify(capture)).not.toContain(projectApiKey);
       }
     } finally {
+      for (const [key, value] of Object.entries(originalAmbientRoutes)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       rmSync(root, { recursive: true, force: true });
     }
   }, 10_000);

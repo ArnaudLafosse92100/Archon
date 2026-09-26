@@ -74,7 +74,12 @@ import {
   getProviderCapabilities,
 } from '@archon/providers';
 import type { SendQueryOptions } from '@archon/providers';
-import { mergeTokenUsage, type MessageChunk, type TokenUsage } from '@archon/providers/types';
+import {
+  STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
+  mergeTokenUsage,
+  type MessageChunk,
+  type TokenUsage,
+} from '@archon/providers/types';
 clearRegistry();
 registerBuiltinProviders();
 // Pi is a community provider (best-effort structured output) — register it so the
@@ -3916,6 +3921,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
             CLAUDE_CODE_OAUTH_TOKEN: 'ambient-oauth',
             ANTHROPIC_OAUTH_TOKEN: 'ambient-oauth',
             CLAUDE_CONFIG_DIR: '/ambient/claude',
+            PROJECT_VAR: 'preserved',
           },
           preparedProviderLaunches: {
             claude: {
@@ -3930,7 +3936,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
                 ANTHROPIC_OAUTH_TOKEN: token,
                 CLAUDE_CONFIG_DIR: '/run/claude-config',
               },
-              neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+              neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
               deliveredAliases: [
                 'CLAUDE_CODE_OAUTH_TOKEN',
                 'ANTHROPIC_OAUTH_TOKEN',
@@ -3947,16 +3953,21 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
 
     expect(seenOptions).toHaveLength(2);
     for (const options of seenOptions) {
-      expect(options.env).toMatchObject({
-        OPENAI_API_KEY: '',
-        CODEX_API_KEY: '',
-        CODEX_HOME: '',
-        ANTHROPIC_API_KEY: '',
-        CLAUDE_API_KEY: '',
-        CLAUDE_CODE_OAUTH_TOKEN: token,
-        ANTHROPIC_OAUTH_TOKEN: token,
-        CLAUDE_CONFIG_DIR: '/run/claude-config',
-      });
+      expect(options.env).toEqual(
+        expect.objectContaining({
+          OPENAI_API_KEY: 'ambient-openai',
+          CODEX_API_KEY: 'ambient-codex',
+          CODEX_HOME: '/ambient/codex',
+          PROJECT_VAR: 'preserved',
+          CLAUDE_CODE_OAUTH_TOKEN: token,
+          ANTHROPIC_OAUTH_TOKEN: token,
+          CLAUDE_CONFIG_DIR: '/run/claude-config',
+        })
+      );
+      const actualEnv = options.env as Record<string, string | undefined>;
+      for (const key of STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS) {
+        expect(actualEnv[key]).toBe('');
+      }
       expect(options.providerLaunchAttestation).toEqual({
         version: 1,
         provider: 'claude',
@@ -3966,7 +3977,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
           kind: 'subscription',
           delivery: 'environment',
         },
-        neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+        neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
         deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
         managedPathIdentity: 'claude-config',
         envPolicy: 'targeted_empty_overrides',
@@ -4012,6 +4023,8 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
             OPENAI_API_KEY: 'ambient-openai',
             CODEX_API_KEY: 'ambient-codex',
             CODEX_HOME: '/ambient/codex-home',
+            ANTHROPIC_API_KEY: 'ambient-anthropic',
+            CLAUDE_CODE_OAUTH_TOKEN: 'ambient-claude-oauth',
           },
           preparedProviderLaunches: {
             codex: {
@@ -4039,11 +4052,8 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
       OPENAI_API_KEY: '',
       CODEX_API_KEY: '',
       CODEX_HOME: '/run/codex-home',
-      ANTHROPIC_API_KEY: '',
-      CLAUDE_API_KEY: '',
-      CLAUDE_CODE_OAUTH_TOKEN: '',
-      ANTHROPIC_OAUTH_TOKEN: '',
-      CLAUDE_CONFIG_DIR: '',
+      ANTHROPIC_API_KEY: 'ambient-anthropic',
+      CLAUDE_CODE_OAUTH_TOKEN: 'ambient-claude-oauth',
     });
     expect(options?.providerLaunchAttestation).toMatchObject({
       provider: 'codex',

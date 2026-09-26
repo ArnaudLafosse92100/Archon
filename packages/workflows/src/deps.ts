@@ -19,6 +19,7 @@ import type {
   ProviderCapabilities,
   ProviderLaunchAttestationV1,
 } from '@archon/providers/types';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '@archon/providers/types';
 import type { RawAliasesConfig, RawTiersConfig } from './model-validation';
 import type {
   WorkflowRunConfigLayer,
@@ -29,6 +30,7 @@ import type {
 export const CODEX_AUTH_JSON_RELATIVE_PATH = 'codex-home/auth.json';
 export const CLAUDE_CONFIG_RELATIVE_PATH = 'claude-config';
 export const PI_AUTH_JSON_RELATIVE_PATH = 'pi-home/auth.json';
+export { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS };
 export const MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS = [
   CODEX_AUTH_JSON_RELATIVE_PATH,
   PI_AUTH_JSON_RELATIVE_PATH,

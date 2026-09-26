@@ -18,6 +18,7 @@ import {
   createLogger,
 } from '@archon/paths';
 import { getDatabaseType } from '@archon/core';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '@archon/providers/types';
 
 const log = createLogger('cli:version');
 
@@ -113,6 +114,7 @@ const PROVIDER_LAUNCH_ATTESTATION_CONTRACT = {
   evidence: 'local_launch_preparation',
   envPolicy: 'targeted_empty_overrides',
   aliasSemantics: 'neutralized_not_absent',
+  strictClaudeNeutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
   billingClaim: 'unverified',
 } as const;
 

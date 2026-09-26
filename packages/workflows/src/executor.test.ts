@@ -8,6 +8,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'path';
 import { randomUUID } from 'node:crypto';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '@archon/providers/types';
 
 // --- Mock logger ---
 const mockLogFn = mock(() => {});
@@ -2926,7 +2927,7 @@ describe('executeWorkflow', () => {
       expect(prepared).toMatchObject({
         provider: 'claude',
         credential: { vendor: 'anthropic', kind: 'subscription', delivery: 'environment' },
-        neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+        neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
         deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
         envPolicy: 'targeted_empty_overrides',
         filesystemSettingsPolicy: 'disabled',
