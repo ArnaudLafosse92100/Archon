@@ -256,6 +256,9 @@ function configuredKeyPaths(layer: WorkflowRunConfigLayer): string[] {
   if (layer.credentialPolicy?.providers.codex !== undefined) {
     paths.push('credentialPolicy.providers.codex.requiredKind');
   }
+  if (layer.credentialPolicy?.providers.claude !== undefined) {
+    paths.push('credentialPolicy.providers.claude.requiredKind');
+  }
   return paths.sort();
 }
 

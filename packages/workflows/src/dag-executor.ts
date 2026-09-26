@@ -1852,7 +1852,48 @@ async function resolveNodeProviderAndModel(
   if (execContext.kind === 'container') {
     baseOptions.execContext = execContext;
   }
-  if (config.envVars && Object.keys(config.envVars).length > 0) {
+  const preparedLaunch =
+    provider === 'codex' || provider === 'claude'
+      ? config.preparedProviderLaunches?.[provider]
+      : undefined;
+  if (preparedLaunch) {
+    // Both built-in providers merge request env over process.env. Empty-string
+    // overrides are therefore the only portable way to make inherited aliases
+    // absent at the actual subprocess boundary without mutating process.env.
+    const sanitizedEnv: Record<string, string> = { ...config.envVars };
+    for (const key of [
+      'OPENAI_API_KEY',
+      'CODEX_API_KEY',
+      'CODEX_HOME',
+      'ANTHROPIC_API_KEY',
+      'CLAUDE_API_KEY',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_OAUTH_TOKEN',
+      'CLAUDE_CONFIG_DIR',
+    ]) {
+      sanitizedEnv[key] = '';
+    }
+    Object.assign(sanitizedEnv, preparedLaunch.deliveryEnv);
+    baseOptions.env = sanitizedEnv;
+    baseOptions.providerLaunchAttestation = {
+      version: 1,
+      provider: preparedLaunch.provider,
+      nodeId: node.id,
+      ...(model ? { model } : {}),
+      credential: preparedLaunch.credential,
+      absentApiAliases: preparedLaunch.absentApiAliases,
+      deliveredAliases: preparedLaunch.deliveredAliases,
+      ...(preparedLaunch.managedPathIdentity
+        ? { managedPathIdentity: preparedLaunch.managedPathIdentity }
+        : {}),
+      sanitizedEnvPolicy: preparedLaunch.sanitizedEnvPolicy,
+      // The provider owns its executable resolver and may defer to an SDK in
+      // development mode. Do not claim a path or digest that is not bound to
+      // the eventual spawn.
+      executableIdentity: { status: 'deferred_to_provider' },
+      billingClaim: 'unverified',
+    };
+  } else if (config.envVars && Object.keys(config.envVars).length > 0) {
     baseOptions.env = config.envVars;
   }
   if (config.protectedEnvKeys && config.protectedEnvKeys.length > 0) {

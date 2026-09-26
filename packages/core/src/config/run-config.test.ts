@@ -277,11 +277,14 @@ describe('workflow run config', () => {
     expect(unsealWorkflowRunConfig(metadata)).toEqual(input.layer);
   });
 
-  it('seals and restores the Codex subscription policy without exposing its value', () => {
+  it('seals and restores provider subscription policies without exposing their values', () => {
     const input = parseWorkflowRunConfig(
       {
         credentialPolicy: {
-          providers: { codex: { requiredKind: 'subscription' } },
+          providers: {
+            codex: { requiredKind: 'subscription' },
+            claude: { requiredKind: 'subscription' },
+          },
         },
       },
       { kind: 'cli', label: 'config.yaml' }
@@ -290,6 +293,7 @@ describe('workflow run config', () => {
     const serialized = JSON.stringify(metadata);
 
     expect(metadata.keys).toContain('credentialPolicy.providers.codex.requiredKind');
+    expect(metadata.keys).toContain('credentialPolicy.providers.claude.requiredKind');
     expect(serialized).not.toContain('subscription');
     expect(unsealWorkflowRunConfig(metadata)).toEqual(input.layer);
   });

@@ -619,7 +619,31 @@ export interface NodeConfig {
  * The orchestrator path uses base AgentRequestOptions fields only.
  * The workflow path additionally passes nodeConfig and assistantConfig.
  */
+export interface ProviderLaunchAttestationV1 {
+  version: 1;
+  provider: 'codex' | 'claude';
+  nodeId: string;
+  model?: string;
+  credential: {
+    vendor: string;
+    kind: 'subscription';
+    delivery: 'environment' | 'managed_file';
+  };
+  absentApiAliases: readonly string[];
+  deliveredAliases: readonly string[];
+  managedPathIdentity?: string;
+  sanitizedEnvPolicy: 'explicit_empty_override';
+  executableIdentity: { status: 'deferred_to_provider' };
+  billingClaim: 'unverified';
+}
+
 export interface SendQueryOptions extends AgentRequestOptions {
+  /**
+   * Non-secret, run-local evidence of the credential isolation applied by the
+   * workflow engine immediately before this provider call. Providers may use it
+   * for local diagnostics; it is not provider-side billing proof.
+   */
+  providerLaunchAttestation?: ProviderLaunchAttestationV1;
   /** Raw YAML node config — provider translates internally to SDK-specific options. */
   nodeConfig?: NodeConfig;
   /** Per-provider defaults from .archon/config.yaml assistants section. */

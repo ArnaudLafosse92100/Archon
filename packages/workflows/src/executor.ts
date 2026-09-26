@@ -5,9 +5,13 @@ import { mkdir, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { dirname, join } from 'path';
-import { CODEX_AUTH_JSON_RELATIVE_PATH, MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS } from './deps';
+import {
+  CLAUDE_CONFIG_RELATIVE_PATH,
+  CODEX_AUTH_JSON_RELATIVE_PATH,
+  MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS,
+} from './deps';
 import type { IWorkflowPlatform, WorkflowMessageMetadata } from './deps';
-import type { WorkflowDeps } from './deps';
+import type { PreparedProviderLaunch, StrictSubscriptionProvider, WorkflowDeps } from './deps';
 import * as archonPaths from '@archon/paths';
 import { createLogger, captureWorkflowInvoked, captureWorkflowCompleted } from '@archon/paths';
 import { getDefaultBranch, toRepoPath } from '@archon/git';
@@ -318,45 +322,51 @@ function failCredentialPolicy(code: CredentialPolicyErrorCode): never {
  * deps adapter is absent.
  *
  * Without a credential policy, adapter failures yield empty bags so existing
- * runs continue with ambient env inheritance. With a strict Codex subscription
- * policy, missing or mismatched provenance and delivery failures throw stable,
- * non-secret policy codes before the DAG starts. File write failures otherwise
- * drop the resolved env but retain values needed for failure-path redaction.
+ * runs continue with ambient env inheritance. With a strict Codex or Claude
+ * subscription policy, missing or mismatched provenance and delivery failures
+ * throw stable, non-secret policy codes before the DAG starts. File write
+ * failures otherwise drop the resolved env but retain values needed for
+ * failure-path redaction.
  */
 async function resolveUserProviderEnvForWorkflow(
   deps: WorkflowDeps,
   userId: string | undefined,
   artifactsDir: string,
-  requireCodexSubscription = false
-): Promise<{ env: Record<string, string>; protectedValues: string[] }> {
+  requiredSubscriptions: ReadonlySet<StrictSubscriptionProvider> = new Set()
+): Promise<{
+  env: Record<string, string>;
+  protectedValues: string[];
+  preparedProviderLaunches: Partial<Record<StrictSubscriptionProvider, PreparedProviderLaunch>>;
+}> {
+  const strict = requiredSubscriptions.size > 0;
   const perUserEnabled = deps.isPerUserProviderKeysEnabled?.() ?? false;
   if (!perUserEnabled || !userId || !deps.getUserProviderEnv) {
-    if (requireCodexSubscription) {
+    if (strict) {
       if (!perUserEnabled) failCredentialPolicy(credentialPolicyErrorCodes.providerKeysDisabled);
       if (!userId) failCredentialPolicy(credentialPolicyErrorCodes.userRequired);
       failCredentialPolicy(credentialPolicyErrorCodes.resolverUnavailable);
     }
-    return { env: {}, protectedValues: [] };
+    return { env: {}, protectedValues: [], preparedProviderLaunches: {} };
   }
   let resolved: Awaited<ReturnType<NonNullable<WorkflowDeps['getUserProviderEnv']>>>;
   try {
     resolved = await deps.getUserProviderEnv(userId, artifactsDir);
   } catch (err) {
     getLog().warn({ err: err as Error, userId }, 'workflow.user_provider_env_resolve_failed');
-    if (requireCodexSubscription) {
+    if (strict) {
       failCredentialPolicy(credentialPolicyErrorCodes.resolutionFailed);
     }
-    return { env: {}, protectedValues: [] };
+    return { env: {}, protectedValues: [], preparedProviderLaunches: {} };
   }
 
   if (resolved.status === 'failed') {
-    if (requireCodexSubscription) {
+    if (strict) {
       failCredentialPolicy(credentialPolicyErrorCodes.resolutionFailed);
     }
-    return { env: {}, protectedValues: [] };
+    return { env: {}, protectedValues: [], preparedProviderLaunches: {} };
   }
 
-  if (requireCodexSubscription) {
+  if (strict) {
     if (
       resolved.issues.some(
         issue => issue.code === 'resolution_failed' && issue.vendor === undefined
@@ -364,6 +374,13 @@ async function resolveUserProviderEnvForWorkflow(
     ) {
       failCredentialPolicy(credentialPolicyErrorCodes.resolutionFailed);
     }
+  }
+
+  const preparedProviderLaunches: Partial<
+    Record<StrictSubscriptionProvider, PreparedProviderLaunch>
+  > = {};
+
+  if (requiredSubscriptions.has('codex')) {
     const codexCredential = resolved.credentials.find(item => item.vendor === 'openai');
     if (!codexCredential) {
       const codexIssue = resolved.issues.find(issue => issue.vendor === 'openai');
@@ -392,6 +409,61 @@ async function resolveUserProviderEnvForWorkflow(
     if (resolved.issues.some(issue => issue.vendor === 'openai')) {
       failCredentialPolicy(credentialPolicyErrorCodes.deliveryFailed);
     }
+    preparedProviderLaunches.codex = {
+      provider: 'codex',
+      credential: { ...codexCredential, kind: 'subscription' },
+      deliveryEnv: { CODEX_HOME: expectedCodexHome },
+      absentApiAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
+      deliveredAliases: ['CODEX_HOME'],
+      managedPathIdentity: CODEX_AUTH_JSON_RELATIVE_PATH,
+      sanitizedEnvPolicy: 'explicit_empty_override',
+    };
+  }
+
+  if (requiredSubscriptions.has('claude')) {
+    const claudeCredential = resolved.credentials.find(item => item.vendor === 'anthropic');
+    if (!claudeCredential) {
+      const claudeIssue = resolved.issues.find(issue => issue.vendor === 'anthropic');
+      if (claudeIssue?.code === 'credential_unusable') {
+        failCredentialPolicy(credentialPolicyErrorCodes.credentialUnusable);
+      }
+      if (claudeIssue?.code === 'delivery_failed') {
+        failCredentialPolicy(credentialPolicyErrorCodes.deliveryFailed);
+      }
+      failCredentialPolicy(credentialPolicyErrorCodes.credentialMissing);
+    }
+    if (claudeCredential.kind !== 'subscription') {
+      failCredentialPolicy(credentialPolicyErrorCodes.kindMismatch);
+    }
+    if (claudeCredential.delivery !== 'environment') {
+      failCredentialPolicy(credentialPolicyErrorCodes.deliveryMismatch);
+    }
+    const claudeCodeToken = resolved.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const anthropicOauthToken = resolved.env.ANTHROPIC_OAUTH_TOKEN;
+    if (
+      typeof claudeCodeToken !== 'string' ||
+      claudeCodeToken.length === 0 ||
+      anthropicOauthToken !== claudeCodeToken
+    ) {
+      failCredentialPolicy(credentialPolicyErrorCodes.deliveryMismatch);
+    }
+    if (resolved.issues.some(issue => issue.vendor === 'anthropic')) {
+      failCredentialPolicy(credentialPolicyErrorCodes.deliveryFailed);
+    }
+    const claudeConfigDir = join(artifactsDir, CLAUDE_CONFIG_RELATIVE_PATH);
+    preparedProviderLaunches.claude = {
+      provider: 'claude',
+      credential: { ...claudeCredential, kind: 'subscription' },
+      deliveryEnv: {
+        CLAUDE_CODE_OAUTH_TOKEN: claudeCodeToken,
+        ANTHROPIC_OAUTH_TOKEN: claudeCodeToken,
+        CLAUDE_CONFIG_DIR: claudeConfigDir,
+      },
+      absentApiAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+      deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
+      managedPathIdentity: CLAUDE_CONFIG_RELATIVE_PATH,
+      sanitizedEnvPolicy: 'explicit_empty_override',
+    };
   }
 
   const { env, files, protectedValues } = resolved;
@@ -400,19 +472,25 @@ async function resolveUserProviderEnvForWorkflow(
       await mkdir(dirname(f.path), { recursive: true });
       await writeFile(f.path, f.contents, { encoding: 'utf8', mode: 0o600 });
     }
+    if (requiredSubscriptions.has('claude')) {
+      await mkdir(join(artifactsDir, CLAUDE_CONFIG_RELATIVE_PATH), {
+        recursive: true,
+        mode: 0o700,
+      });
+    }
   } catch (err) {
     getLog().warn({ err: err as Error, userId }, 'workflow.user_provider_files_write_failed');
-    if (requireCodexSubscription) {
+    if (strict) {
       failCredentialPolicy(credentialPolicyErrorCodes.fileWriteFailed);
     }
-    return { env: {}, protectedValues };
+    return { env: {}, protectedValues, preparedProviderLaunches: {} };
   }
 
   const envKeys = Object.keys(env);
   if (envKeys.length > 0) {
     getLog().debug({ userId, keys: envKeys }, 'workflow.user_provider_env_injected');
   }
-  return { env, protectedValues };
+  return { env, protectedValues, preparedProviderLaunches };
 }
 
 /**
@@ -2905,16 +2983,30 @@ export async function executeWorkflow(
     return { success: false, workflowRunId: workflowRun.id, error: message };
   }
 
-  const requireCodexSubscription =
-    effectiveRunConfig?.layer.credentialPolicy?.providers.codex?.requiredKind === 'subscription';
+  const requiredSubscriptions = new Set<StrictSubscriptionProvider>();
+  if (
+    effectiveRunConfig?.layer.credentialPolicy?.providers.codex?.requiredKind === 'subscription'
+  ) {
+    requiredSubscriptions.add('codex');
+  }
+  if (
+    effectiveRunConfig?.layer.credentialPolicy?.providers.claude?.requiredKind === 'subscription'
+  ) {
+    requiredSubscriptions.add('claude');
+  }
   let userProviderEnv: Record<string, string>;
   let protectedValues: string[];
+  let preparedProviderLaunches: Partial<Record<StrictSubscriptionProvider, PreparedProviderLaunch>>;
   try {
-    ({ env: userProviderEnv, protectedValues } = await resolveUserProviderEnvForWorkflow(
+    ({
+      env: userProviderEnv,
+      protectedValues,
+      preparedProviderLaunches,
+    } = await resolveUserProviderEnvForWorkflow(
       deps,
       executionUserId,
       artifactsDir,
-      requireCodexSubscription
+      requiredSubscriptions
     ));
   } catch (error) {
     const code =
@@ -2934,6 +3026,7 @@ export async function executeWorkflow(
     return { success: false, workflowRunId: workflowRun.id, error: code };
   }
   config.envVars = { ...config.envVars, ...userProviderEnv };
+  config.preparedProviderLaunches = preparedProviderLaunches;
   for (const key of Object.keys(userProviderEnv)) {
     protectedEnvKeys.add(key);
   }

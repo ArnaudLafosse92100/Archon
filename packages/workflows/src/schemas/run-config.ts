@@ -14,6 +14,12 @@ export const workflowCredentialPolicySchema = z
           })
           .strict()
           .optional(),
+        claude: z
+          .object({
+            requiredKind: z.literal('subscription'),
+          })
+          .strict()
+          .optional(),
       })
       .strict(),
   })

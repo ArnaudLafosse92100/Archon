@@ -120,6 +120,7 @@ import type { IWorkflowStore } from './store';
 import type { WorkflowRun, WorkflowWaitContext } from './schemas/workflow-run';
 import type { ResolvedWorkflow } from './schemas/workflow';
 import type { WorkflowRunConfigMetadata } from './schemas/run-config';
+import type { SendQueryOptions } from '@archon/providers/types';
 import type {
   ChildIsolationResolver,
   ChildIsolationRequest,
@@ -1046,6 +1047,121 @@ nodes:
       effective: {
         aliases: { large: { provider: 'codex', model: 'gpt-5.6-sol' } },
       },
+    });
+  });
+
+  it('re-resolves and applies strict Claude subscription launch isolation in a child', async () => {
+    await writeWorkflow(
+      'child-strict-claude',
+      `
+name: child-strict-claude
+description: child using strict Claude subscription auth
+nodes:
+  - id: child-work
+    prompt: "child work"
+`
+    );
+    await writeWorkflow(
+      'parent-strict-claude',
+      `
+name: parent-strict-claude
+description: parent composing a strict Claude child
+nodes:
+  - id: sub
+    workflow: child-strict-claude
+`
+    );
+
+    const token = 'child-claude-subscription-token';
+    const seenOptions: unknown[] = [];
+    const provider = makeProvider();
+    provider.sendQuery = mock(function* (
+      _prompt: string,
+      _cwd: string,
+      _resume: string | undefined,
+      options: SendQueryOptions | undefined
+    ) {
+      seenOptions.push(options);
+      yield { type: 'assistant', content: 'ai-output' };
+      yield { type: 'result', sessionId: 'sess' };
+    }) as typeof provider.sendQuery;
+    const store = new InMemoryStore();
+    const deps: WorkflowDeps = {
+      ...makeDeps(store),
+      getAgentProvider: mock(() => provider) as unknown as WorkflowDeps['getAgentProvider'],
+      isPerUserProviderKeysEnabled: () => true,
+      getUserProviderEnv: mock(async (_userId, _artifactsDir) => ({
+        status: 'resolved' as const,
+        env: {
+          ANTHROPIC_API_KEY: 'ambient-api-key',
+          CLAUDE_CODE_OAUTH_TOKEN: token,
+          ANTHROPIC_OAUTH_TOKEN: token,
+        },
+        files: [],
+        protectedValues: ['ambient-api-key', token],
+        credentials: [
+          {
+            vendor: 'anthropic',
+            kind: 'subscription' as const,
+            delivery: 'environment' as const,
+          },
+        ],
+        issues: [],
+      })),
+      sealRunConfig: (_layer, source): WorkflowRunConfigMetadata => ({
+        version: 1,
+        ciphertext: 'opaque-test-payload',
+        source,
+        keys: ['credentialPolicy.providers.claude.requiredKind'],
+      }),
+    };
+    const parent = await discover('parent-strict-claude');
+    const result = await executeWorkflow(
+      deps,
+      makePlatform(),
+      'conv-plat',
+      cwd,
+      parent,
+      'goal',
+      'conv-db',
+      {
+        userId: 'user-1',
+        runConfig: {
+          source: { kind: 'cli', label: 'strict-claude.yaml' },
+          layer: {
+            credentialPolicy: {
+              providers: { claude: { requiredKind: 'subscription' } },
+            },
+          },
+        },
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(deps.getUserProviderEnv).toHaveBeenCalledTimes(2);
+    expect(seenOptions).toHaveLength(1);
+    const options = seenOptions[0] as {
+      env?: Record<string, string>;
+      providerLaunchAttestation?: Record<string, unknown>;
+    };
+    expect(options.env).toMatchObject({
+      ANTHROPIC_API_KEY: '',
+      CLAUDE_API_KEY: '',
+      CLAUDE_CODE_OAUTH_TOKEN: token,
+      ANTHROPIC_OAUTH_TOKEN: token,
+      CLAUDE_CONFIG_DIR: expect.any(String),
+    });
+    expect(options.providerLaunchAttestation).toMatchObject({
+      provider: 'claude',
+      nodeId: 'child-work',
+      billingClaim: 'unverified',
+    });
+    expect(JSON.stringify(options.providerLaunchAttestation)).not.toContain(token);
+    const childRun = [...store.runs.values()].find(
+      run => run.workflow_name === 'child-strict-claude'
+    );
+    expect(childRun?.metadata.run_config).toMatchObject({
+      keys: ['credentialPolicy.providers.claude.requiredKind'],
     });
   });
 

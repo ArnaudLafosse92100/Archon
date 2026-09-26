@@ -3877,6 +3877,258 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
     ]);
   }, 5_000);
 
+  it('re-applies strict Claude launch isolation on every retry without leaking the token', async () => {
+    const token = 'resolved-claude-subscription';
+    const seenOptions: Array<Record<string, unknown>> = [];
+    let callCount = 0;
+    mockSendQueryDag.mockImplementation(async function* (_prompt, _cwd, _resume, options) {
+      seenOptions.push(options as unknown as Record<string, unknown>);
+      callCount++;
+      if (callCount === 1) throw new Error('Claude Code crash: process exited with code 1');
+      yield { type: 'assistant', content: 'Recovered' };
+      yield { type: 'result', sessionId: 'strict-claude-retry' };
+    });
+
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflow: {
+          name: 'strict-claude-retry',
+          nodes: [
+            {
+              id: 'strict-node',
+              kind: 'agent',
+              source: { kind: 'command', name: 'my-cmd' },
+              retry: { max_attempts: 1, delay_ms: 1 },
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('strict-claude-retry'),
+        config: {
+          ...minimalConfig,
+          envVars: {
+            OPENAI_API_KEY: 'ambient-openai',
+            CODEX_API_KEY: 'ambient-codex',
+            CODEX_HOME: '/ambient/codex',
+            ANTHROPIC_API_KEY: 'ambient-anthropic',
+            CLAUDE_API_KEY: 'ambient-claude',
+            CLAUDE_CODE_OAUTH_TOKEN: 'ambient-oauth',
+            ANTHROPIC_OAUTH_TOKEN: 'ambient-oauth',
+            CLAUDE_CONFIG_DIR: '/ambient/claude',
+          },
+          preparedProviderLaunches: {
+            claude: {
+              provider: 'claude',
+              credential: {
+                vendor: 'anthropic',
+                kind: 'subscription',
+                delivery: 'environment',
+              },
+              deliveryEnv: {
+                CLAUDE_CODE_OAUTH_TOKEN: token,
+                ANTHROPIC_OAUTH_TOKEN: token,
+                CLAUDE_CONFIG_DIR: '/run/claude-config',
+              },
+              absentApiAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+              deliveredAliases: [
+                'CLAUDE_CODE_OAUTH_TOKEN',
+                'ANTHROPIC_OAUTH_TOKEN',
+                'CLAUDE_CONFIG_DIR',
+              ],
+              managedPathIdentity: 'claude-config',
+              sanitizedEnvPolicy: 'explicit_empty_override',
+            },
+          },
+        },
+      })
+    );
+
+    expect(seenOptions).toHaveLength(2);
+    for (const options of seenOptions) {
+      expect(options.env).toMatchObject({
+        OPENAI_API_KEY: '',
+        CODEX_API_KEY: '',
+        CODEX_HOME: '',
+        ANTHROPIC_API_KEY: '',
+        CLAUDE_API_KEY: '',
+        CLAUDE_CODE_OAUTH_TOKEN: token,
+        ANTHROPIC_OAUTH_TOKEN: token,
+        CLAUDE_CONFIG_DIR: '/run/claude-config',
+      });
+      expect(options.providerLaunchAttestation).toEqual({
+        version: 1,
+        provider: 'claude',
+        nodeId: 'strict-node',
+        credential: {
+          vendor: 'anthropic',
+          kind: 'subscription',
+          delivery: 'environment',
+        },
+        absentApiAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+        deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
+        managedPathIdentity: 'claude-config',
+        sanitizedEnvPolicy: 'explicit_empty_override',
+        executableIdentity: { status: 'deferred_to_provider' },
+        billingClaim: 'unverified',
+      });
+      expect(JSON.stringify(options.providerLaunchAttestation)).not.toContain(token);
+      expect(JSON.stringify(options.providerLaunchAttestation)).not.toContain('/run/claude-config');
+    }
+  });
+
+  it('rebuilds strict Codex launch isolation for the remaining node on resume', async () => {
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'codex',
+      getCapabilities: mockCodexCapabilities,
+    }));
+    const authContents = 'managed-codex-auth-json';
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(),
+        cwd: testDir,
+        workflowProvider: 'codex',
+        workflowModel: 'gpt-6-sol',
+        workflow: {
+          name: 'strict-codex-resume',
+          nodes: [
+            { id: 'done', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } },
+            {
+              id: 'remaining',
+              kind: 'agent',
+              source: { kind: 'command', name: 'my-cmd' },
+              depends_on: ['done'],
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('strict-codex-resume'),
+        priorCompletedNodes: new Map([['done', { output: 'already complete' }]]),
+        config: {
+          ...minimalConfig,
+          envVars: {
+            OPENAI_API_KEY: 'ambient-openai',
+            CODEX_API_KEY: 'ambient-codex',
+            CODEX_HOME: '/ambient/codex-home',
+          },
+          preparedProviderLaunches: {
+            codex: {
+              provider: 'codex',
+              credential: {
+                vendor: 'openai',
+                kind: 'subscription',
+                delivery: 'managed_file',
+              },
+              deliveryEnv: { CODEX_HOME: '/run/codex-home' },
+              absentApiAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
+              deliveredAliases: ['CODEX_HOME'],
+              managedPathIdentity: 'codex-home/auth.json',
+              sanitizedEnvPolicy: 'explicit_empty_override',
+            },
+          },
+          protectedCredentialValues: [authContents],
+        },
+      })
+    );
+
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
+    const options = mockSendQueryDag.mock.calls[0]?.[3];
+    expect(options?.env).toMatchObject({
+      OPENAI_API_KEY: '',
+      CODEX_API_KEY: '',
+      CODEX_HOME: '/run/codex-home',
+      ANTHROPIC_API_KEY: '',
+      CLAUDE_API_KEY: '',
+      CLAUDE_CODE_OAUTH_TOKEN: '',
+      ANTHROPIC_OAUTH_TOKEN: '',
+      CLAUDE_CONFIG_DIR: '',
+    });
+    expect(options?.providerLaunchAttestation).toMatchObject({
+      provider: 'codex',
+      nodeId: 'remaining',
+      model: 'gpt-6-sol',
+      managedPathIdentity: 'codex-home/auth.json',
+      billingClaim: 'unverified',
+    });
+    expect(JSON.stringify(options?.providerLaunchAttestation)).not.toContain(authContents);
+    expect(JSON.stringify(options?.providerLaunchAttestation)).not.toContain('/run/codex-home');
+  });
+
+  it('keeps a mixed Pi builder unlabelled while isolating the strict Codex planner', async () => {
+    const seen: Array<{ provider: string; options: SendQueryOptions | undefined }> = [];
+    const deps = createMockDeps();
+    deps.getAgentProvider.mockImplementation(provider => ({
+      sendQuery: mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+        async function* (_prompt, _cwd, _resume, options) {
+          seen.push({ provider, options });
+          yield { type: 'assistant', content: `${provider}-output` };
+          yield { type: 'result', sessionId: `${provider}-session` };
+        }
+      ),
+      getType: () => provider,
+      getCapabilities: provider === 'codex' ? mockCodexCapabilities : mockClaudeCapabilities,
+    }));
+    await executeDagWorkflow(
+      dagOptions({
+        deps,
+        cwd: testDir,
+        workflowProvider: 'pi',
+        workflow: {
+          name: 'mixed-strict-and-metered',
+          nodes: [
+            {
+              id: 'planner',
+              kind: 'agent',
+              provider: 'codex',
+              source: { kind: 'command', name: 'my-cmd' },
+            },
+            {
+              id: 'builder',
+              kind: 'agent',
+              provider: 'pi',
+              source: { kind: 'command', name: 'my-cmd' },
+              depends_on: ['planner'],
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('mixed-strict-and-metered'),
+        config: {
+          ...minimalConfig,
+          envVars: { OPENAI_API_KEY: 'ambient-openai', PI_ONLY: 'kept-for-builder' },
+          preparedProviderLaunches: {
+            codex: {
+              provider: 'codex',
+              credential: {
+                vendor: 'openai',
+                kind: 'subscription',
+                delivery: 'managed_file',
+              },
+              deliveryEnv: { CODEX_HOME: '/run/codex-home' },
+              absentApiAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
+              deliveredAliases: ['CODEX_HOME'],
+              managedPathIdentity: 'codex-home/auth.json',
+              sanitizedEnvPolicy: 'explicit_empty_override',
+            },
+          },
+        },
+      })
+    );
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({
+      provider: 'codex',
+      options: {
+        env: { OPENAI_API_KEY: '', CODEX_HOME: '/run/codex-home' },
+        providerLaunchAttestation: { provider: 'codex', nodeId: 'planner' },
+      },
+    });
+    expect(seen[1]).toMatchObject({
+      provider: 'pi',
+      options: { env: { OPENAI_API_KEY: 'ambient-openai', PI_ONLY: 'kept-for-builder' } },
+    });
+    expect(seen[1]?.options?.providerLaunchAttestation).toBeUndefined();
+  });
+
   it('workflow fails after exhausting all node retries', async () => {
     let callCount = 0;
     mockSendQueryDag.mockImplementation(async function* () {

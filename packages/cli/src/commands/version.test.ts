@@ -92,6 +92,11 @@ describe('versionCommand', () => {
             requiredKinds: ['subscription'],
             evidence: 'local_credential_resolution',
           },
+          'workflow.credential_policy.claude': {
+            version: 1,
+            requiredKinds: ['subscription'],
+            evidence: 'local_credential_resolution',
+          },
         },
       })
     );

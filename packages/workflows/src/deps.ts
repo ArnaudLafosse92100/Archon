@@ -17,6 +17,7 @@ import type {
   NodeConfig,
   ProviderDefaultsMap,
   ProviderCapabilities,
+  ProviderLaunchAttestationV1,
 } from '@archon/providers/types';
 import type { RawAliasesConfig, RawTiersConfig } from './model-validation';
 import type {
@@ -26,6 +27,7 @@ import type {
 } from './schemas/run-config';
 
 export const CODEX_AUTH_JSON_RELATIVE_PATH = 'codex-home/auth.json';
+export const CLAUDE_CONFIG_RELATIVE_PATH = 'claude-config';
 export const PI_AUTH_JSON_RELATIVE_PATH = 'pi-home/auth.json';
 export const MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS = [
   CODEX_AUTH_JSON_RELATIVE_PATH,
@@ -44,6 +46,23 @@ export interface ProviderCredentialProvenance {
 export interface ProviderCredentialResolutionIssue {
   vendor?: string;
   code: 'credential_unusable' | 'delivery_failed' | 'resolution_failed';
+}
+
+export type StrictSubscriptionProvider = 'codex' | 'claude';
+
+/**
+ * Run-local secret delivery prepared before the DAG starts. This is deliberately
+ * kept out of run metadata and workflow events. The DAG derives a non-secret
+ * per-node attestation from it immediately before each provider invocation.
+ */
+export interface PreparedProviderLaunch {
+  provider: StrictSubscriptionProvider;
+  credential: ProviderCredentialProvenance & { kind: 'subscription' };
+  deliveryEnv: Record<string, string>;
+  absentApiAliases: readonly string[];
+  deliveredAliases: readonly string[];
+  managedPathIdentity?: string;
+  sanitizedEnvPolicy: 'explicit_empty_override';
 }
 
 export type UserProviderEnvResolution =
@@ -73,6 +92,7 @@ export type {
   NodeConfig,
   ProviderDefaultsMap,
   ProviderCapabilities,
+  ProviderLaunchAttestationV1,
 };
 
 // Backwards compat alias — deprecated, prefer direct import from @archon/providers/types
@@ -124,6 +144,8 @@ export interface WorkflowConfig {
   protectedEnvKeys?: readonly string[];
   /** Exact injected credential values, including credentials delivered through files. */
   protectedCredentialValues?: readonly string[];
+  /** Runtime-only strict subscription deliveries; never persisted in run metadata/events. */
+  preparedProviderLaunches?: Partial<Record<StrictSubscriptionProvider, PreparedProviderLaunch>>;
   aliases?: RawAliasesConfig;
   tiers?: RawTiersConfig;
   commands: { folder?: string };

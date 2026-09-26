@@ -2835,6 +2835,19 @@ describe('executeWorkflow', () => {
       keys: ['credentialPolicy.providers.codex.requiredKind'],
     };
 
+    const claudeCredentialPolicy = {
+      layer: {
+        credentialPolicy: { providers: { claude: { requiredKind: 'subscription' as const } } },
+      },
+      source: { kind: 'cli' as const, label: 'claude-credential-policy.yaml' },
+    };
+    const claudePolicyMetadata: WorkflowRunConfigMetadata = {
+      version: 1,
+      ciphertext: 'opaque-claude-policy',
+      source: claudeCredentialPolicy.source,
+      keys: ['credentialPolicy.providers.claude.requiredKind'],
+    };
+
     it('fails before DAG when strict Codex policy resolves an API key', async () => {
       const secret = 'must-not-leak';
       const deps: WorkflowDeps = {
@@ -2868,6 +2881,99 @@ describe('executeWorkflow', () => {
       expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
       expect(JSON.stringify(result)).not.toContain(secret);
       expect(JSON.stringify(result)).not.toContain('/private/worktree');
+    });
+
+    it('prepares strict Claude dual-OAuth delivery and rejects ambient API aliases', async () => {
+      const token = 'claude-subscription-token';
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        sealRunConfig: () => claudePolicyMetadata,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
+          env: {
+            CLAUDE_CODE_OAUTH_TOKEN: token,
+            ANTHROPIC_OAUTH_TOKEN: token,
+            ANTHROPIC_API_KEY: 'ambient-must-not-win',
+          },
+          files: [],
+          protectedValues: [token, 'ambient-must-not-win'],
+          credentials: [
+            {
+              vendor: 'anthropic',
+              kind: 'subscription' as const,
+              delivery: 'environment' as const,
+            },
+          ],
+          issues: [],
+        })),
+      };
+
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow(),
+        'msg',
+        'db-c1',
+        { userId: 'u-1', runConfig: claudeCredentialPolicy }
+      );
+
+      expect(result.success).toBe(true);
+      const prepared =
+        mockExecuteDagWorkflow.mock.calls[0]?.[0].config.preparedProviderLaunches?.claude;
+      expect(prepared).toMatchObject({
+        provider: 'claude',
+        credential: { vendor: 'anthropic', kind: 'subscription', delivery: 'environment' },
+        absentApiAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+        deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
+        sanitizedEnvPolicy: 'explicit_empty_override',
+      });
+      expect(prepared?.deliveryEnv).toMatchObject({
+        CLAUDE_CODE_OAUTH_TOKEN: token,
+        ANTHROPIC_OAUTH_TOKEN: token,
+        CLAUDE_CONFIG_DIR: expect.any(String),
+      });
+    });
+
+    it('fails before DAG when strict Claude delivery lacks either OAuth alias', async () => {
+      const deps: WorkflowDeps = {
+        ...makeDeps(makeStore()),
+        sealRunConfig: () => claudePolicyMetadata,
+        isPerUserProviderKeysEnabled: () => true,
+        getUserProviderEnv: mock(async () => ({
+          status: 'resolved' as const,
+          env: { CLAUDE_CODE_OAUTH_TOKEN: 'one-sided-token' },
+          files: [],
+          protectedValues: ['one-sided-token'],
+          credentials: [
+            {
+              vendor: 'anthropic',
+              kind: 'subscription' as const,
+              delivery: 'environment' as const,
+            },
+          ],
+          issues: [],
+        })),
+      };
+
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow(),
+        'msg',
+        'db-c1',
+        { userId: 'u-1', runConfig: claudeCredentialPolicy }
+      );
+
+      expect(result).toMatchObject({
+        success: false,
+        error: 'credential_policy_delivery_mismatch',
+      });
+      expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
     });
 
     it('fails before DAG when resolution rejects a legacy incomplete OpenAI credential', async () => {

@@ -102,6 +102,12 @@ const CODEX_CREDENTIAL_POLICY_CONTRACT = {
   evidence: 'local_credential_resolution',
 } as const;
 
+const CLAUDE_CREDENTIAL_POLICY_CONTRACT = {
+  version: 1,
+  requiredKinds: ['subscription'],
+  evidence: 'local_credential_resolution',
+} as const;
+
 export async function versionCommand(json = false): Promise<void> {
   let version: string;
   let gitCommit: string;
@@ -134,6 +140,7 @@ export async function versionCommand(json = false): Promise<void> {
         contracts: {
           'node_failed.data.error_class': NODE_FAILURE_CLASS_CONTRACT,
           'workflow.credential_policy.codex': CODEX_CREDENTIAL_POLICY_CONTRACT,
+          'workflow.credential_policy.claude': CLAUDE_CREDENTIAL_POLICY_CONTRACT,
         },
       })
     );
