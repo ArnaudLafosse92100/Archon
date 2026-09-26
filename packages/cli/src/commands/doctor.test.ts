@@ -947,6 +947,31 @@ describe('doctorCommand', () => {
     expect(exit).toBe(1);
   });
 
+  it('emits one machine-readable checks array with managed-resource metadata', async () => {
+    const check = async () => ({
+      id: 'codegraph_managed_v1',
+      label: 'Managed CodeGraph',
+      status: 'pass' as const,
+      message: 'ready',
+      configured: true,
+      ready: true,
+      schemaVersion: 1,
+      protocol: 'codegraph_worktree_adapter_v1',
+      expectedVersion: '1.5.0',
+      contractSha256: 'a'.repeat(64),
+    });
+    expect(await doctorCommand([check], false, true)).toBe(0);
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0]));
+    expect(payload.ok).toBeTrue();
+    expect(payload.checks[0]).toMatchObject({
+      id: 'codegraph_managed_v1',
+      configured: true,
+      ready: true,
+      expectedVersion: '1.5.0',
+    });
+  });
+
   it('counts a thrown check as a failure (allSettled rejection branch)', async () => {
     const exit = await doctorCommand([passing('A'), throwing('B')]);
     expect(exit).toBe(1);

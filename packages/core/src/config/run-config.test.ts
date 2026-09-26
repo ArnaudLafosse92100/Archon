@@ -40,6 +40,7 @@ describe('workflow run config', () => {
         workflows: { quotaMaxAttempts: 3 },
         docs: { path: 'handbook' },
         env: { BENCH_TOKEN: 'top-secret' },
+        managedResources: { codegraph: { mode: 'required' } },
       },
       { kind: 'http', label: 'inline' }
     );
@@ -54,6 +55,7 @@ describe('workflow run config', () => {
         workflows: { quotaMaxAttempts: 3 },
         docsPath: 'handbook',
         envVars: { BENCH_TOKEN: 'top-secret' },
+        managedResources: { codegraph: { mode: 'required' } },
       },
     });
   });
@@ -265,6 +267,7 @@ describe('workflow run config', () => {
       {
         assistants: { pi: { extensionFlags: { auth: 'provider-secret' } } },
         env: { TOKEN: 'env-secret' },
+        managedResources: { codegraph: { mode: 'optional' } },
       },
       { kind: 'cli', label: 'config.minimax.yaml' }
     );
@@ -273,7 +276,11 @@ describe('workflow run config', () => {
 
     expect(serialized).not.toContain('provider-secret');
     expect(serialized).not.toContain('env-secret');
-    expect(metadata.keys).toEqual(['assistants.pi.extensionFlags', 'env.TOKEN']);
+    expect(metadata.keys).toEqual([
+      'assistants.pi.extensionFlags',
+      'env.TOKEN',
+      'managedResources.codegraph.mode',
+    ]);
     expect(unsealWorkflowRunConfig(metadata)).toEqual(input.layer);
   });
 

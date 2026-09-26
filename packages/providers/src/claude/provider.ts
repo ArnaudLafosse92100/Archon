@@ -700,6 +700,22 @@ async function applyNodeConfig(
     }
   }
 
+  if (nodeConfig.managedMcpServers && Object.keys(nodeConfig.managedMcpServers).length > 0) {
+    const existing = (options.mcpServers ?? {}) as Record<string, unknown>;
+    const collision = Object.keys(nodeConfig.managedMcpServers).find(name => name in existing);
+    if (collision) {
+      throw new Error(`Managed MCP server '${collision}' conflicts with node MCP configuration.`);
+    }
+    options.mcpServers = {
+      ...existing,
+      ...nodeConfig.managedMcpServers,
+    } as Options['mcpServers'];
+    options.allowedTools = [
+      ...(options.allowedTools ?? []),
+      ...Object.keys(nodeConfig.managedMcpServers).map(name => `mcp__${name}__*`),
+    ];
+  }
+
   // Native skill selection. The SDK requires Skill to remain allowed when an
   // explicit tool list is present; without a list, its normal tool set applies.
   if (selectsSkills) {

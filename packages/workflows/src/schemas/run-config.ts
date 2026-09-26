@@ -1,6 +1,7 @@
 import { z } from '@hono/zod-openapi';
 import { MAX_DURABLE_WAIT_MS } from './durable-wait';
 import { runAliasesConfigSchema, runTiersConfigSchema } from './model-binding';
+import { managedResourcesRunSchema } from './managed-resources';
 
 const providerDefaultsSchema = z.record(z.string(), z.unknown());
 
@@ -49,6 +50,7 @@ export const workflowRunConfigLayerSchema = z
     docsPath: z.string().trim().min(1).optional(),
     envVars: z.record(z.string(), z.string()).optional(),
     credentialPolicy: workflowCredentialPolicySchema.optional(),
+    managedResources: managedResourcesRunSchema.optional(),
   })
   .strict();
 

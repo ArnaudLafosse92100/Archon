@@ -15,6 +15,7 @@
     "./workflow-discovery": "./src/workflow-discovery.ts",
     "./model-validation": "./src/model-validation.ts",
     "./run-config": "./src/run-config.ts",
+    "./managed-codegraph-registry": "./src/managed-codegraph-registry.ts",
     "./script-discovery": "./src/script-discovery.ts",
     "./command-validation": "./src/command-validation.ts",
     "./defaults": "./src/defaults/bundled-defaults.ts",

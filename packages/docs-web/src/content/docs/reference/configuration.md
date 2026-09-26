@@ -55,6 +55,8 @@ Settings are loaded in this order (later overrides earlier):
 
 The last three layers exist only where their setting has a run-time consumer. Archon-managed GitHub and provider credentials remain protected and are injected after user-authored run environment values.
 
+`managedResources.codegraph_managed_v1` is an exception to ordinary layering: it is an operator-owned, global-only registry in `~/.archon/config.yaml`. Repository and run config cannot replace its command paths, digests, pin, protocol, or privacy environment. A run may select only the governed `off | optional | required` mode.
+
 ## Global Configuration
 
 Create `~/.archon/config.yaml` for user-wide preferences:
@@ -121,6 +123,12 @@ aliases:
 
 ```
 
+### Managed CodeGraph registry
+
+An operator installer may add `managedResources.codegraph_managed_v1` to the global config. Archon treats that entry as read-only and validates its schema version, adapter protocol, executable and dependency-bundle digests, OpenConfig version pin, runtime bundle, and exact privacy environment. Do not copy this entry into a repository or hand-author arbitrary commands: the owner tool is responsible for atomic install and rotation. `archon doctor --json` probes the registry without invoking the adapter or starting CodeGraph.
+
+At run time Archon gives the governed adapter only the exact created or adopted worktree. A successful strict-freshness attestation permits Archon to expose `codegraph serve --mcp -p <exact-worktree>` to MCP-capable host providers. Pi and OpenCode do not receive it. Container execution cannot reach the host stdio server. Therefore `required` fails before the first provider call for any incompatible node or container run; `optional` continues without CodeGraph and reports the fallback.
+
 The `tiers:` block above is no longer hand-edit-only -- you can also set the `small`/`medium`/`large` presets from the console **AI Settings** -> **Model Tiers** panel, or from the CLI with [`archon ai tier set`](/reference/cli/#ai). Connecting your own provider API key or subscription is covered in [Per-user credentials and AI Settings](/getting-started/ai-assistants/#per-user-credentials-and-ai-settings).
 
 These files are persistent layers. For one invocation, use repeatable [`workflow run --model <name>=<spec>`](/reference/cli/#workflow-run-name-message), [`workflow run --config <path>`](/reference/cli/#per-run-config-files), or the run API's inline `config`, `tiers`, and `aliases` fields. Each run layer is sparse and sits above user, repository, global, and built-in values without editing a persistent config file.
@@ -137,6 +145,9 @@ workflows:
   quotaMaxAttempts: 3
 env:
   BENCH_MODE: "1"
+managedResources:
+  codegraph:
+    mode: optional
 ```
 
 ```bash
@@ -147,7 +158,7 @@ archon workflow run x \
 
 The file changes only the keys it contains. The explicit model flag is the final layer, so the command above replaces the file's `large` binding and keeps the file or lower-layer `small`, `medium`, aliases, assistant defaults, and other settings.
 
-Run config accepts settings whose consumers still execute after the run is dispatched: `assistant` or `defaultAssistant`, `assistants`, `tiers`, `aliases`, `workflows`, `docs.path`, and `env`. It fails before source capture, isolation, or execution when a key cannot truthfully apply at that point:
+Run config accepts settings whose consumers still execute after the run is dispatched: `assistant` or `defaultAssistant`, `assistants`, `tiers`, `aliases`, `workflows`, `docs.path`, `env`, and `managedResources.codegraph.mode`. The equivalent CLI flag is `--codegraph off|optional|required`; an explicit flag wins over the run-config value. It fails before source capture, isolation, or execution when a key cannot truthfully apply at that point:
 
 - `commands` and `defaults` already affected workflow and command discovery.
 - `worktree` and `container` already affected isolation.

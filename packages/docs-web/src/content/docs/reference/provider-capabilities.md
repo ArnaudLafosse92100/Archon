@@ -24,6 +24,9 @@ capability for that provider; a ❌ means the capability is unsupported. Unsuppo
 behavior is feature-specific: some optional fields are ignored with a warning, while
 strict contracts fail closed. In particular, `context.resume` rejects an explicitly
 unsupported provider at load time and an implicitly resolved one at runtime.
+Managed CodeGraph follows the MCP axis: `optional` omits it with an observable
+fallback for providers without MCP, while `required` rejects the whole DAG before
+the first provider call. Its host stdio server is also unavailable to container runs.
 
 ## Providers
 

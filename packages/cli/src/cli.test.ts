@@ -20,6 +20,7 @@ import {
   rejectConfigOnContinue,
   rejectConfigOutsideRun,
   rejectModelOnContinue,
+  validateCodegraphMode,
 } from './dispatch-guards';
 
 const CLI_ENTRY = join(import.meta.dir, 'cli.ts');
@@ -130,6 +131,7 @@ describe('CLI startup import boundary', () => {
       'packages/paths/src/logger.ts',
       'packages/workflows/src/schemas/durable-wait.ts',
       'packages/workflows/src/schemas/effort.ts',
+      'packages/workflows/src/schemas/managed-resources.ts',
       'packages/workflows/src/schemas/model-binding.ts',
       'packages/workflows/src/schemas/run-config.ts',
     ]);
@@ -429,6 +431,7 @@ Options:
   --input <name>=<value>     Supply a declared workflow input; repeat per input (mutually exclusive with --resume)
   --model <name>=<spec>      Rebind small/medium/large or @alias for one run; repeat per binding
   --config <path>            Load a sparse YAML config layer for one fresh workflow run
+  --codegraph <mode>         Attach managed CodeGraph to this run: off, optional, or required
   --resume                   Resume the most recent failed or paused run of the workflow (mutually exclusive with --branch)
   --adopt <run-id>           Start a new run adopting a terminal run's worktree/branch + artifacts ($ADOPTED_RUN_DIR)
   --supersedes <run-id>      Record this fresh run as replacing the prior run's open item (no lane inheritance)
@@ -635,6 +638,16 @@ describe('workflow run config argument', () => {
     const message = rejectConfigOutsideRun('chat', undefined, './does-not-exist.yaml');
     expect(message).toBeDefined();
     expect(message).toContain('--config can only be used with workflow run');
+  });
+
+  it('accepts only governed CodeGraph modes on workflow run', () => {
+    expect(validateCodegraphMode('workflow', 'run', 'required')).toBeUndefined();
+    expect(validateCodegraphMode('workflow', 'run', 'turbo')).toContain(
+      '--codegraph must be one of'
+    );
+    expect(validateCodegraphMode('doctor', undefined, 'optional')).toContain(
+      '--codegraph can only be used with workflow run'
+    );
   });
 
   it('resolves a relative config path from the requested subdirectory cwd', async () => {

@@ -41,6 +41,7 @@ import {
   STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
   mergeTokenUsage,
 } from '@archon/providers/types';
+import { loadMcpConfig } from '@archon/providers/mcp/config';
 import type { ContainerRunContext } from './container-context';
 import { WRITEBACK_GATE_NODE_ID } from './container-context';
 import {
@@ -183,9 +184,7 @@ import {
   type SendMessageContext,
 } from './executor-shared';
 import {
-  isLiteralSpec,
   isTierName,
-  resolveModelSpec,
   resolvePresetEffort,
   type ModelAliasPreset,
   type ResolvedAiProfile,
@@ -1754,6 +1753,22 @@ async function resolveNodeProviderAndModel(
   // Get provider capabilities for capability warnings (static lookup, no instantiation)
   const caps = getProviderCapabilities(provider);
 
+  const preparedCodegraph = config.preparedCodegraph;
+  if (preparedCodegraph && !caps.mcp) {
+    if (preparedCodegraph.mode === 'required') {
+      throw new Error(
+        `Node '${node.id}': CodeGraph is required but provider '${provider}' does not support MCP.`
+      );
+    }
+    getLog().warn({ nodeId: node.id, provider }, 'dag.codegraph_optional_provider_fallback');
+    await safeSendMessage(
+      platform,
+      conversationId,
+      `Warning: Node '${node.id}' uses provider '${provider}', which cannot receive the optional CodeGraph MCP capability; continuing without CodeGraph.`,
+      { workflowId: workflowRunId, nodeName: node.id }
+    );
+  }
+
   // `webSearchMode:` is Codex's alone — no other provider reads it, and #2556
   // decided it keeps no node-level form, making it the single workflow-level
   // field with no per-node counterpart. There is deliberately no
@@ -1919,6 +1934,17 @@ async function resolveNodeProviderAndModel(
   const nodeConfig: NodeConfig = {
     nodeId: node.id,
     mcp: node.mcp,
+    ...(preparedCodegraph && caps.mcp
+      ? {
+          managedMcpServers: {
+            codegraph: {
+              command: preparedCodegraph.command,
+              args: preparedCodegraph.args,
+              env: preparedCodegraph.env,
+            },
+          },
+        }
+      : {}),
     hooks: node.hooks,
     skills: node.skills,
     agents,
@@ -2177,6 +2203,9 @@ async function executeNodeInternal(
       : {};
 
   const configuredMcpNames = await loadConfiguredMcpServerNames(node.mcp, cwd);
+  for (const name of Object.keys(nodeOptions?.nodeConfig?.managedMcpServers ?? {})) {
+    configuredMcpNames.add(name);
+  }
 
   const lifecycleIdentity = createNodeLifecycleIdentity(node.id, true);
   const authContext = await persistAiNodeAuthContext({
@@ -11508,22 +11537,37 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
 }
 
 /**
- * Resolve the AI provider a node would use, WITHOUT the messaging/side effects
- * of `resolveNodeProviderAndModel` — just enough for the container capability
- * pre-flight. Mirrors the provider half of that resolver: `node.provider ??
- * workflowProvider`, then a model tier/alias ref may override the provider.
+ * Inputs needed to resolve a node's effective provider before execution without
+ * invoking the provider or emitting warnings.
  */
+interface ProviderPreflightResolution {
+  workflowModel: string | undefined;
+  workflowPreset: ModelAliasPreset | undefined;
+  workflowTier: TierName | undefined;
+  workflowEffort: EffortLevel | undefined;
+  config: WorkflowConfig;
+}
+
 function resolveNodeProviderForPreflight(
   node: DagNode,
   workflowProvider: string,
-  aiProfile?: ResolvedAiProfile
+  aiProfile?: ResolvedAiProfile,
+  resolution?: ProviderPreflightResolution
 ): string {
-  let provider: string = node.provider ?? workflowProvider;
-  if (node.model && aiProfile) {
-    const spec = resolveModelSpec(aiProfile, node.model);
-    if (!isLiteralSpec(spec)) provider = spec.provider;
-  }
-  return provider;
+  const resolvedWorkflowProvider = resolution?.workflowPreset?.provider ?? workflowProvider;
+  return resolveNodeModel(
+    node,
+    {
+      provider: resolvedWorkflowProvider,
+      model: resolution?.workflowModel,
+      preset: resolution?.workflowPreset,
+      tier: resolution?.workflowTier,
+      effort: resolution?.workflowEffort,
+      providerOrigin: 'workflow',
+    },
+    resolution ? assistantModelDefaults(resolution.config) : {},
+    aiProfile
+  ).provider;
 }
 
 /**
@@ -11537,33 +11581,85 @@ function resolveNodeProviderForPreflight(
 export function collectContainerIncompatibleProviders(
   nodes: readonly DagNode[],
   workflowProvider: string,
-  aiProfile?: ResolvedAiProfile
+  aiProfile?: ResolvedAiProfile,
+  resolution?: ProviderPreflightResolution
+): Set<string> {
+  return collectIncompatibleProviders(
+    nodes,
+    workflowProvider,
+    aiProfile,
+    capabilities => capabilities.containerExec,
+    resolution
+  );
+}
+
+function collectIncompatibleProviders(
+  nodes: readonly DagNode[],
+  workflowProvider: string,
+  aiProfile: ResolvedAiProfile | undefined,
+  supports: (capabilities: ProviderCapabilities) => boolean,
+  resolution?: ProviderPreflightResolution
 ): Set<string> {
   const incompatible = new Set<string>();
   const check = (provider: string): void => {
     if (!isRegisteredProvider(provider)) return;
-    if (!getProviderCapabilities(provider).containerExec) incompatible.add(provider);
+    if (!supports(getProviderCapabilities(provider))) incompatible.add(provider);
   };
   const visit = (ns: readonly (DagNode | IncludeDirective)[]): void => {
     for (const node of ns) {
       if (isIncludeDirective(node) || isExecNode(node) || isHaltNode(node)) continue;
       if (isLoopGroupNode(node)) {
-        check(resolveNodeProviderForPreflight(node, workflowProvider, aiProfile));
+        check(resolveNodeProviderForPreflight(node, workflowProvider, aiProfile, resolution));
         visit(node.loop_group.nodes);
         continue;
       }
       if (isGateNode(node)) {
         if (node.decisions.some(d => d.rework !== undefined)) {
-          check(resolveNodeProviderForPreflight(node, workflowProvider, aiProfile));
+          check(resolveNodeProviderForPreflight(node, workflowProvider, aiProfile, resolution));
         }
         continue;
       }
       // agent / loop → AI node
-      check(resolveNodeProviderForPreflight(node, workflowProvider, aiProfile));
+      check(resolveNodeProviderForPreflight(node, workflowProvider, aiProfile, resolution));
     }
   };
   visit(nodes);
   return incompatible;
+}
+
+/** Collect AI-node providers that cannot receive the managed CodeGraph MCP server. */
+function collectMcpIncompatibleProviders(
+  nodes: readonly DagNode[],
+  workflowProvider: string,
+  aiProfile?: ResolvedAiProfile,
+  resolution?: ProviderPreflightResolution
+): Set<string> {
+  return collectIncompatibleProviders(
+    nodes,
+    workflowProvider,
+    aiProfile,
+    capabilities => capabilities.mcp,
+    resolution
+  );
+}
+
+async function collectReservedCodegraphMcpNodes(
+  nodes: readonly (DagNode | IncludeDirective)[],
+  cwd: string
+): Promise<string[]> {
+  const collisions: string[] = [];
+  const visit = async (entries: readonly (DagNode | IncludeDirective)[]): Promise<void> => {
+    for (const node of entries) {
+      if (isIncludeDirective(node)) continue;
+      if (node.mcp) {
+        const { serverNames } = await loadMcpConfig(node.mcp, cwd);
+        if (serverNames.includes('codegraph')) collisions.push(node.id);
+      }
+      if (isLoopGroupNode(node)) await visit(node.loop_group.nodes);
+    }
+  };
+  await visit(nodes);
+  return collisions;
 }
 
 /**
@@ -12019,6 +12115,63 @@ export async function executeDagWorkflow(
     workflowSourceRoots,
   } = options;
   const dagStartTime = Date.now();
+  const workflowTier = workflow.model && isTierName(workflow.model) ? workflow.model : undefined;
+  const providerPreflightResolution: ProviderPreflightResolution = {
+    workflowModel,
+    workflowPreset,
+    workflowTier,
+    workflowEffort: workflow.effort,
+    config,
+  };
+  let executionConfig = config;
+
+  // The governed server is a host process. A containerized Claude turn cannot
+  // reach that stdio transport, even though Claude supports MCP on the host.
+  if (config.preparedCodegraph && execContext.kind === 'container') {
+    if (config.preparedCodegraph.mode === 'required') {
+      throw new Error(
+        'CodeGraph is required but managed MCP is unavailable in container execution.'
+      );
+    }
+    getLog().warn({ workflowRunId: workflowRun.id }, 'dag.codegraph_optional_container_fallback');
+    await safeSendMessage(
+      platform,
+      conversationId,
+      'Warning: This workflow runs in a container, which cannot receive the optional host CodeGraph MCP capability; continuing without CodeGraph.',
+      { workflowId: workflowRun.id }
+    );
+    executionConfig = { ...config, preparedCodegraph: undefined };
+  }
+
+  // `codegraph` is reserved by the managed capability. Resolve every declared
+  // MCP file before provider 1 so a collision in a late node cannot burn tokens
+  // before the provider translator rejects it.
+  if (executionConfig.preparedCodegraph) {
+    const collisions = await collectReservedCodegraphMcpNodes(workflow.nodes, cwd);
+    if (collisions.length > 0) {
+      throw new Error(
+        `Managed MCP server 'codegraph' conflicts with node MCP configuration on node${collisions.length === 1 ? '' : 's'}: ${collisions.join(', ')}.`
+      );
+    }
+  }
+
+  // A required managed capability is a run-level promise. Validate the whole DAG
+  // before the first node/provider so a late Pi/GLM node cannot fail after earlier spend.
+  if (config.preparedCodegraph?.mode === 'required') {
+    const incompatible = collectMcpIncompatibleProviders(
+      workflow.nodes,
+      workflowProvider,
+      aiProfile,
+      providerPreflightResolution
+    );
+    if (incompatible.size > 0) {
+      const list = [...incompatible].sort().join(', ');
+      throw new Error(
+        `CodeGraph is required but provider${incompatible.size === 1 ? '' : 's'} '${list}' ` +
+          `${incompatible.size === 1 ? 'does' : 'do'} not support MCP.`
+      );
+    }
+  }
 
   // Container capability fail-fast: before ANY node runs (and before any
   // container work), reject a container run whose AI nodes resolve to a provider
@@ -12028,7 +12181,8 @@ export async function executeDagWorkflow(
     const incompatible = collectContainerIncompatibleProviders(
       workflow.nodes,
       workflowProvider,
-      aiProfile
+      aiProfile,
+      providerPreflightResolution
     );
     if (incompatible.size > 0) {
       const list = [...incompatible].sort().join(', ');
@@ -12085,7 +12239,6 @@ export async function executeDagWorkflow(
     }
   }
 
-  const workflowTier = workflow.model && isTierName(workflow.model) ? workflow.model : undefined;
   const workflowLevelOptions = {
     effort: workflow.effort,
     fallbackModel: workflow.fallbackModel,
@@ -12220,7 +12373,7 @@ export async function executeDagWorkflow(
     workflowRun,
     workflowName: workflow.name,
     workflowSourceRoots: workflowSourceRoots ?? liveSourceRoots(cwd),
-    config,
+    config: executionConfig,
     workflowProvider,
     workflowModel,
     workflowLevelOptions,

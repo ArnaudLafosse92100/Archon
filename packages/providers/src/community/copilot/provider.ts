@@ -189,18 +189,31 @@ async function applyMcpServers(
   warnings: ProviderWarning[]
 ): Promise<void> {
   const mcpPath = nodeConfig?.mcp;
-  if (typeof mcpPath !== 'string' || mcpPath.length === 0) return;
-
-  const { servers, serverNames, missingVars } = await loadMcpConfig(mcpPath, cwd);
-
-  if (missingVars.length > 0) {
-    warnings.push({
-      code: 'copilot.mcp_env_vars_missing',
-      message: `Copilot MCP config references undefined env vars: ${missingVars.join(', ')}. Servers using them may fail at runtime.`,
-    });
+  let servers: Record<string, unknown> = {};
+  let serverNames: string[] = [];
+  let missingVars: string[] = [];
+  if (typeof mcpPath === 'string' && mcpPath.length > 0) {
+    const loaded = await loadMcpConfig(mcpPath, cwd);
+    servers = loaded.servers;
+    serverNames = loaded.serverNames;
+    missingVars = loaded.missingVars;
+    if (missingVars.length > 0) {
+      warnings.push({
+        code: 'copilot.mcp_env_vars_missing',
+        message: `Copilot MCP config references undefined env vars: ${missingVars.join(', ')}. Servers using them may fail at runtime.`,
+      });
+    }
   }
 
-  sessionConfig.mcpServers = servers as Record<string, MCPServerConfig>;
+  const managed = nodeConfig?.managedMcpServers ?? {};
+  const collision = Object.keys(managed).find(name => name in servers);
+  if (collision) {
+    throw new Error(`Managed MCP server '${collision}' conflicts with node MCP configuration.`);
+  }
+  const merged = { ...servers, ...managed };
+  if (Object.keys(merged).length === 0) return;
+  sessionConfig.mcpServers = merged as Record<string, MCPServerConfig>;
+  serverNames = [...serverNames, ...Object.keys(managed)];
   getLog().info({ serverNames, missingVars }, 'copilot.mcp_loaded');
 }
 

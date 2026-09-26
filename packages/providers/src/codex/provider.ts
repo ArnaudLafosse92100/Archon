@@ -947,6 +947,26 @@ export class CodexProvider implements IAgentProvider {
       }
     }
 
+    const managedMcpServers = requestOptions?.nodeConfig?.managedMcpServers;
+    if (managedMcpServers && Object.keys(managedMcpServers).length > 0) {
+      const declaredNames = new Set(
+        Object.keys(
+          (declaredMcpConfigOverrides?.mcp_servers as Record<string, unknown> | undefined) ?? {}
+        )
+      );
+      const collision = Object.keys(managedMcpServers).find(name => declaredNames.has(name));
+      if (collision) {
+        throw new Error(`Managed MCP server '${collision}' conflicts with node MCP configuration.`);
+      }
+      const managedOverrides = buildCodexMcpConfigOverrides(managedMcpServers);
+      const combined: CodexConfigOverrides = { ...(declaredMcpConfigOverrides ?? {}) };
+      setCodexConfigValue(combined, 'mcp_servers', {
+        ...((declaredMcpConfigOverrides?.mcp_servers as Record<string, unknown> | undefined) ?? {}),
+        ...((managedOverrides?.mcp_servers as Record<string, unknown> | undefined) ?? {}),
+      });
+      declaredMcpConfigOverrides = combined;
+    }
+
     const suppressWorkflowSkillCatalog = isWorkflowNode(requestOptions);
     const initialConfigOverrides = suppressWorkflowSkillCatalog
       ? withWorkflowSkillCatalogDisabled(declaredMcpConfigOverrides)

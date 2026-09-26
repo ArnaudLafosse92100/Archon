@@ -147,7 +147,7 @@ export async function versionCommand(json = false): Promise<void> {
         name: 'archon',
         version,
         revision,
-        capabilities: ['archon-auth-context-v1'],
+        capabilities: ['archon-auth-context-v1', 'codegraph_managed_v1'],
         contracts: {
           'node_failed.data.error_class': NODE_FAILURE_CLASS_CONTRACT,
           'workflow.credential_policy.codex': CODEX_CREDENTIAL_POLICY_CONTRACT,

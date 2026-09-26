@@ -35,6 +35,7 @@ const keyClassifications = {
   docs: { kind: 'runtime' },
   env: { kind: 'runtime' },
   credentialPolicy: { kind: 'runtime' },
+  managedResources: { kind: 'runtime' },
   commands: {
     kind: 'unavailable',
     reason: 'workflow and command discovery already ran before run dispatch',
@@ -214,6 +215,7 @@ export function parseWorkflowRunConfig(
     ...(isRecord(docs) && docs.path !== undefined ? { docsPath: docs.path } : {}),
     ...(value.env !== undefined ? { envVars: value.env } : {}),
     ...(value.credentialPolicy !== undefined ? { credentialPolicy: value.credentialPolicy } : {}),
+    ...(value.managedResources !== undefined ? { managedResources: value.managedResources } : {}),
   };
   const parsed = workflowRunConfigLayerSchema.safeParse(candidate);
   if (!parsed.success) throw validationError(parsed.error);
@@ -258,6 +260,9 @@ function configuredKeyPaths(layer: WorkflowRunConfigLayer): string[] {
   }
   if (layer.credentialPolicy?.providers.claude !== undefined) {
     paths.push('credentialPolicy.providers.claude.requiredKind');
+  }
+  if (layer.managedResources?.codegraph !== undefined) {
+    paths.push('managedResources.codegraph.mode');
   }
   return paths.sort();
 }
