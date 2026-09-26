@@ -2493,7 +2493,7 @@ model: medium        # Tier, alias, or literal model override
 `model:` accepts three shapes:
 
 - `small`, `medium`, or `large` - portable tier refs resolved from `tiers:` in `~/.archon/config.yaml` and `.archon/config.yaml`, with built-in defaults for claude and codex only
-- `@name` - custom aliases from `aliases:`; use these for project workflows, not bundled or global workflows, because aliases are project-specific
+- `@name` - custom aliases from `aliases:`; use these for project workflows, not bundled or global workflows, because aliases are project-specific. Four portable system aliases are also available to every workflow: `@implementer`, `@architect`, `@reviewer`, and `@adjudicator`. Their default tier fallbacks are `medium`, `large`, `medium`, and `medium` respectively; an explicit alias binding overrides that fallback.
 - Any other string - a literal model id passed through to the resolved provider's SDK
 
 Tier and alias refs resolve to a provider, model, and optional `effort`. If a workflow or node sets both `provider:` and a model ref that resolves to a different provider, Archon warns and uses the provider from the resolved preset. Literal model strings keep the normal provider chain (`node.provider ?? workflow.provider ?? config.assistant`).
@@ -2600,7 +2600,7 @@ To validate that all referenced command files, MCP config files, and skill direc
 archon validate workflows <name>
 ```
 
-This checks resource resolution beyond what load-time validation covers. Bundled and global workflows also reject `@custom` model aliases because those refs are not portable across projects. Use `--json` for machine-readable output. See the [CLI Reference](/reference/cli/) for details.
+This checks resource resolution beyond what load-time validation covers. Bundled and global workflows also reject arbitrary `@custom` model aliases because those refs are not portable across projects. The four portable system aliases (`@implementer`, `@architect`, `@reviewer`, `@adjudicator`) are accepted. Use `--json` for machine-readable output. See the [CLI Reference](/reference/cli/) for details.
 
 ### Unknown Keys Are Reported, Not Rejected
 

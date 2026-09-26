@@ -5,6 +5,30 @@ export const TIER_NAMES = ['small', 'medium', 'large'] as const;
 export const tierNameSchema = z.enum(TIER_NAMES);
 export type TierName = z.infer<typeof tierNameSchema>;
 
+/**
+ * Portable capability names that bundled/global workflows may depend on.
+ *
+ * These are virtual defaults, not materialized aliases: resolving through the
+ * tier at use time keeps sparse per-run tier overrides effective. An explicit
+ * configured alias with the same name still wins.
+ */
+export const PORTABLE_SYSTEM_ALIAS_TIERS = {
+  '@implementer': 'medium',
+  '@architect': 'large',
+  '@reviewer': 'medium',
+  '@adjudicator': 'medium',
+} as const satisfies Readonly<Record<string, TierName>>;
+
+export type PortableSystemAlias = keyof typeof PORTABLE_SYSTEM_ALIAS_TIERS;
+
+export function isPortableSystemAlias(value: string): value is PortableSystemAlias {
+  return Object.hasOwn(PORTABLE_SYSTEM_ALIAS_TIERS, value);
+}
+
+export function portableSystemAliasTier(value: string): TierName | undefined {
+  return isPortableSystemAlias(value) ? PORTABLE_SYSTEM_ALIAS_TIERS[value] : undefined;
+}
+
 const modelAliasPresetObjectSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),

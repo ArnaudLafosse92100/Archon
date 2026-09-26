@@ -2586,6 +2586,23 @@ describe('expandWorkflowIncludes — where a workflow-level model: travels (#176
     expect(nodes[0]).toMatchObject({ provider: 'codex', model: 'gpt-5.6-sol' });
   });
 
+  test('preserves portable semantic aliases while inlining a leaf workflow', () => {
+    const leaf = {
+      ...wf('leaf', [
+        { id: 'review', prompt: 'review' },
+        { id: 'synthesize', prompt: 'synthesize', model: '@adjudicator' },
+      ]),
+      model: '@reviewer',
+    } as WorkflowDefinition;
+    const parent = wf('parent', [{ id: 'included', include: 'leaf' }]);
+
+    const { workflows, errors } = expandWorkflowIncludes(mapOf(leaf, parent));
+
+    expect(errors).toHaveLength(0);
+    expect(nodeById(workflows.get('parent')!, 'included__review')?.model).toBe('@reviewer');
+    expect(nodeById(workflows.get('parent')!, 'included__synthesize')?.model).toBe('@adjudicator');
+  });
+
   test('travels to a node that redundantly re-declares the SAME provider', () => {
     // The branch a regression would most plausibly drop, and a common authoring habit.
     const nodes = collapse({

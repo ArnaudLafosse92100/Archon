@@ -56,7 +56,12 @@ import type { WorkflowDefinition, DagNode, IncludeDirective, WorkflowSource } fr
 import type { ScriptRuntime } from './script-discovery';
 import { discoverScriptsForCwd } from './script-discovery';
 import { isInlineScript } from './executor-shared';
-import { buildAiProfile, isLiteralSpec, resolveModelSpec } from './model-validation';
+import {
+  buildAiProfile,
+  isLiteralSpec,
+  isPortableSystemAlias,
+  resolveModelSpec,
+} from './model-validation';
 import { getPackagedResourceDirectory, parsePackagedResourceReference } from './packaged-workflow';
 import type { RawAliasesConfig, RawTiersConfig, ResolvedAiProfile } from './model-validation';
 
@@ -426,7 +431,11 @@ export async function validateWorkflowResources(
     }
   };
 
-  if (requiresPortableModelRefs && workflow.model?.startsWith('@')) {
+  if (
+    requiresPortableModelRefs &&
+    workflow.model?.startsWith('@') &&
+    !isPortableSystemAlias(workflow.model)
+  ) {
     issues.push({
       level: 'error',
       field: 'model',
@@ -510,7 +519,12 @@ export async function validateWorkflowResources(
     const providerCaps =
       provider && isRegisteredProvider(provider) ? getProviderCapabilities(provider) : undefined;
 
-    if (requiresPortableModelRefs && 'model' in node && node.model?.startsWith('@')) {
+    if (
+      requiresPortableModelRefs &&
+      'model' in node &&
+      node.model?.startsWith('@') &&
+      !isPortableSystemAlias(node.model)
+    ) {
       issues.push({
         level: 'error',
         nodeId: node.id,

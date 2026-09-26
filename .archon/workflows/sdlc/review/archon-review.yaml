@@ -16,7 +16,7 @@ description: |
   NOT for: fixing findings (implement), running the project's checks (validate),
   or writing code.
 
-model: medium
+model: "@reviewer"
 
 inputs:
   scope:
@@ -154,6 +154,7 @@ nodes:
   # between the lenses and this node without changing either side's contract —
   # the findings files are the declared boundary.
   - id: synthesize
+    model: "@adjudicator"
     command: review-synthesize
     context: fresh
     output_type: review-report

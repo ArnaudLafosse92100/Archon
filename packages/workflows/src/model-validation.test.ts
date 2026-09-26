@@ -8,11 +8,13 @@ import {
   parseRunModelAssignments,
   readRunModelBindingsMetadata,
   resolveRunModelOverrides,
+  runOverrideAppliesToRef,
   isEffortValidForProvider,
   isLiteralSpec,
   resolvePresetEffort,
   resolveModelSpec,
   resolveTierWithFallback,
+  PORTABLE_SYSTEM_ALIAS_TIERS,
   TIER_NAMES,
   validEffortsForProvider,
   type ModelAliasPreset,
@@ -29,6 +31,56 @@ registerCommunityProviders();
 describe('TIER_NAMES constant', () => {
   test('contains exactly small, medium, large', () => {
     expect([...TIER_NAMES]).toEqual(['small', 'medium', 'large']);
+  });
+});
+
+describe('portable system aliases', () => {
+  test('exposes the stable capability-to-tier contract', () => {
+    expect(PORTABLE_SYSTEM_ALIAS_TIERS).toEqual({
+      '@implementer': 'medium',
+      '@architect': 'large',
+      '@reviewer': 'medium',
+      '@adjudicator': 'medium',
+    });
+  });
+
+  test('resolves virtual aliases through their live tier presets', () => {
+    const profile = buildAiProfile('claude', {
+      repoTiers: {
+        medium: { provider: 'codex', model: 'gpt-5.6-sol' },
+        large: { provider: 'claude', model: 'opus' },
+      },
+    });
+
+    expect(resolveModelSpec(profile, '@implementer')).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+    });
+    expect(resolveModelSpec(profile, '@architect')).toEqual({
+      provider: 'claude',
+      model: 'opus',
+    });
+    expect(resolveModelSpec(profile, '@reviewer')).toEqual(resolveModelSpec(profile, 'medium'));
+    expect(resolveModelSpec(profile, '@adjudicator')).toEqual(resolveModelSpec(profile, 'medium'));
+  });
+
+  test('an explicitly configured alias shadows its virtual tier default', () => {
+    const profile = buildAiProfile('claude', {
+      repoAliases: {
+        '@architect': { provider: 'codex', model: 'gpt-5.6-sol' },
+      },
+    });
+
+    expect(resolveModelSpec(profile, '@architect')).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+    });
+  });
+
+  test('fails with tier guidance when a virtual alias has no resolvable tier', () => {
+    expect(() => resolveModelSpec(buildAiProfile('newprovider'), '@architect')).toThrow(
+      /Tier 'large' has no configured preset/
+    );
   });
 });
 
@@ -437,6 +489,54 @@ describe('per-run model bindings', () => {
     expect(() => resolveRunModelOverrides(base, { tiers: { large: '@missing' } })).toThrow(
       /Unknown alias '@missing'/
     );
+  });
+
+  test('rebinds a portable alias without requiring a configured alias', () => {
+    const profile = buildAiProfile('claude');
+    const run = resolveRunModelOverrides(profile, {
+      aliases: { '@architect': 'codex/gpt-5.6-sol' },
+    });
+    const effective = applyResolvedRunModelOverrides(profile, run);
+
+    expect(run.aliases?.['@architect']).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+    });
+    expect(resolveModelSpec(effective, '@architect')).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+    });
+    expect(runOverrideAppliesToRef(run, '@architect', profile)).toBe(true);
+  });
+
+  test('a tier override dynamically changes an unconfigured portable alias', () => {
+    const profile = buildAiProfile('claude');
+    const run = resolveRunModelOverrides(profile, {
+      tiers: { large: 'codex/gpt-5.6-sol' },
+    });
+    const effective = applyResolvedRunModelOverrides(profile, run);
+
+    expect(resolveModelSpec(effective, '@architect')).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+    });
+    expect(runOverrideAppliesToRef(run, '@architect', profile)).toBe(true);
+  });
+
+  test('tier attribution stays false when a configured alias shadows the virtual default', () => {
+    const profile = buildAiProfile('claude', {
+      repoAliases: { '@architect': { provider: 'claude', model: 'opus-pinned' } },
+    });
+    const run = resolveRunModelOverrides(profile, {
+      tiers: { large: 'codex/gpt-5.6-sol' },
+    });
+    const effective = applyResolvedRunModelOverrides(profile, run);
+
+    expect(resolveModelSpec(effective, '@architect')).toEqual({
+      provider: 'claude',
+      model: 'opus-pinned',
+    });
+    expect(runOverrideAppliesToRef(run, '@architect', profile)).toBe(false);
   });
 
   test('metadata round-trips the sparse override and effective snapshot', () => {

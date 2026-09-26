@@ -261,6 +261,43 @@ describe('validateWorkflowResources — bundled workflow: target check', () => {
 // =============================================================================
 
 describe('validateWorkflowResources — portable model refs', () => {
+  test('bundled workflow accepts portable system aliases at workflow and node level', async () => {
+    await createCommandFile('my-command');
+    const workflow = {
+      ...makeWorkflow('test', [
+        {
+          id: 'step1',
+          kind: 'agent',
+          source: { kind: 'command', name: 'my-command' },
+          model: '@adjudicator',
+        } as DagNode,
+      ]),
+      model: '@architect',
+    } as WorkflowDefinition;
+
+    const issues = await validateWorkflowResources(workflow, tmpDir, {
+      workflowSource: 'bundled',
+    });
+
+    expect(issues.some(i => i.field === 'model')).toBe(false);
+  });
+
+  test('global workflow accepts portable system aliases', async () => {
+    await createCommandFile('my-command');
+    const workflow = {
+      ...makeWorkflow('test', [
+        { id: 'step1', kind: 'agent', source: { kind: 'command', name: 'my-command' } } as DagNode,
+      ]),
+      model: '@implementer',
+    } as WorkflowDefinition;
+
+    const issues = await validateWorkflowResources(workflow, tmpDir, {
+      workflowSource: 'global',
+    });
+
+    expect(issues.some(i => i.field === 'model')).toBe(false);
+  });
+
   test('bundled workflow rejects top-level @custom model ref', async () => {
     await createCommandFile('my-command');
     const workflow = {

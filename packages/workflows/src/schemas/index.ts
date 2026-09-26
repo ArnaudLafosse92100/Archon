@@ -30,6 +30,9 @@ export type { EffortLevel } from './effort';
 
 // Model binding profiles and durable run metadata
 export {
+  isPortableSystemAlias,
+  portableSystemAliasTier,
+  PORTABLE_SYSTEM_ALIAS_TIERS,
   TIER_NAMES,
   tierNameSchema,
   modelAliasPresetSchema,
@@ -41,6 +44,7 @@ export {
   runModelBindingsMetadataSchema,
 } from './model-binding';
 export type {
+  PortableSystemAlias,
   TierName,
   ModelAliasPreset,
   RawAliasEntry,

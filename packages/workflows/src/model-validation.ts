@@ -3,7 +3,8 @@
  *
  * Classifies a model reference string as one of:
  *   - tier keyword (`small` / `medium` / `large`) → looked up in profile with fallback chain
- *   - `@<name>` custom alias → looked up in profile, errors if unknown
+ *   - `@<name>` alias → explicit profile entry, then portable system fallback,
+ *     errors if unknown
  *   - bare literal (anything else) → returned unchanged for SDK pass-through
  *
  * No side effects, no logger, no I/O — apart from the provider registry lookup
@@ -24,6 +25,9 @@ import tierDefaults from './defaults/tier-defaults.json';
 import { EFFORT_LEVELS } from './schemas/dag-node';
 import type { EffortLevel } from './schemas/dag-node';
 import {
+  isPortableSystemAlias,
+  portableSystemAliasTier,
+  PORTABLE_SYSTEM_ALIAS_TIERS,
   runModelBindingsMetadataSchema,
   TIER_NAMES,
   type ModelAliasPreset,
@@ -36,7 +40,7 @@ import {
   type TierName,
 } from './schemas/model-binding';
 
-export { TIER_NAMES };
+export { isPortableSystemAlias, PORTABLE_SYSTEM_ALIAS_TIERS, TIER_NAMES };
 export type {
   ModelAliasPreset,
   RawAliasEntry,
@@ -307,8 +311,10 @@ function presetForOverrideTarget(profile: ResolvedAiProfile, name: string): Mode
   assertNotReserved(name);
   assertCustomAliasPrefix(name);
   const preset = profile.aliases[name];
-  if (!preset) throw new Error(`Cannot rebind unknown alias '${name}'.`);
-  return preset;
+  if (preset) return preset;
+  const implicitTier = portableSystemAliasTier(name);
+  if (implicitTier) return resolveTierWithFallback(profile, implicitTier).preset;
+  throw new Error(`Cannot rebind unknown alias '${name}'.`);
 }
 
 function normalizeRunOverridePreset(targetName: string, preset: RawAliasEntry): RawAliasEntry {
@@ -454,11 +460,20 @@ export function hasRunModelOverrides(overrides: ResolvedRunModelOverrides): bool
 
 export function runOverrideAppliesToRef(
   overrides: ResolvedRunModelOverrides,
-  ref: string | undefined
+  ref: string | undefined,
+  baseProfile: ResolvedAiProfile
 ): boolean {
   if (!ref) return false;
   if (isTierName(ref)) return overrides.tiers?.[ref] !== undefined;
-  return ref.startsWith('@') && overrides.aliases?.[ref] !== undefined;
+  if (!ref.startsWith('@')) return false;
+  if (overrides.aliases?.[ref] !== undefined) return true;
+
+  // A configured alias shadows the portable virtual default, so a tier
+  // override did not affect this reference. Callers that care about exact
+  // attribution pass the lower profile used to apply the sparse run layer.
+  if (baseProfile.aliases[ref] !== undefined) return false;
+  const implicitTier = portableSystemAliasTier(ref);
+  return implicitTier !== undefined && overrides.tiers?.[implicitTier] !== undefined;
 }
 
 export function createRunModelBindingsMetadata(
@@ -570,7 +585,7 @@ export function resolveTierWithFallback(
 /**
  * Classify a `model:` reference and resolve it against the profile.
  *   - tier ('small' | 'medium' | 'large') → preset via fallback chain
- *   - '@<name>' → preset from profile.aliases, or throw if unknown
+ *   - '@<name>' → explicit preset, then portable system alias tier, or throw
  *   - anything else → { literal: ref } pass-through
  */
 export function resolveModelSpec(profile: ResolvedAiProfile, ref: string): ResolvedModelSpec {
@@ -581,6 +596,8 @@ export function resolveModelSpec(profile: ResolvedAiProfile, ref: string): Resol
   if (ref.startsWith('@')) {
     const preset = profile.aliases[ref];
     if (preset) return preset;
+    const implicitTier = portableSystemAliasTier(ref);
+    if (implicitTier) return resolveTierWithFallback(profile, implicitTier).preset;
     const defined = Object.keys(profile.aliases);
     const list = defined.length > 0 ? defined.join(', ') : '(none)';
     throw new Error(`Unknown alias '${ref}'. Defined aliases: ${list}`);

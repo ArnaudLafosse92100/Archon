@@ -1288,6 +1288,35 @@ describe('executeWorkflow', () => {
       });
     });
 
+    it('attributes a tier override reached through a portable system alias', async () => {
+      const store = makeStore();
+      await executeWorkflow(
+        makeDeps(store),
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow({ model: '@architect' }),
+        'msg',
+        'db-conv-1',
+        {
+          modelOverrideLayer: {
+            kind: 'raw',
+            overrides: { tiers: { large: 'codex/gpt-5.6-sol' } },
+          },
+        }
+      );
+
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].workflowProvider).toBe('codex');
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].workflowModel).toBe('gpt-5.6-sol');
+      expect(
+        (mockLogFn.mock.calls as unknown[][]).some(
+          call =>
+            call[1] === 'workflow_provider_resolved' &&
+            (call[0] as { providerSource?: string }).providerSource === 'run-override'
+        )
+      ).toBe(true);
+    });
+
     it('merges effective bindings onto a pre-created fresh run before DAG execution', async () => {
       const updateRun = mock<IWorkflowStore['updateWorkflowRun']>(async () => {});
       const preCreatedRun = makeRun({ id: 'pending-run', status: 'pending', metadata: {} });
@@ -1490,6 +1519,45 @@ describe('executeWorkflow', () => {
           }
         )
       ).rejects.toThrow(/Cannot supply model overrides when resuming/);
+    });
+
+    it('restores a persisted portable alias override on resume', async () => {
+      const preCreatedRun = makeRun({
+        id: 'resume-system-alias-run',
+        status: 'running',
+        metadata: {
+          model_bindings: {
+            overrides: {
+              aliases: {
+                '@architect': { provider: 'codex', model: 'gpt-5.6-sol' },
+              },
+            },
+            effective: {
+              defaultProvider: 'claude',
+              aliases: {
+                small: { provider: 'claude', model: 'haiku' },
+                medium: { provider: 'claude', model: 'sonnet' },
+                large: { provider: 'claude', model: 'opus' },
+                '@architect': { provider: 'codex', model: 'gpt-5.6-sol' },
+              },
+            },
+          },
+        },
+      });
+
+      await executeWorkflow(
+        makeDeps(makeStore()),
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow({ model: '@architect' }),
+        'msg',
+        'db-conv-1',
+        { preCreatedRun, priorCompletedNodes: new Map() }
+      );
+
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].workflowProvider).toBe('codex');
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].workflowModel).toBe('gpt-5.6-sol');
     });
 
     it('terminalizes a resumed run before dispatch when persisted effort is ineffective', async () => {

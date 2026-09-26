@@ -2298,7 +2298,11 @@ export async function executeWorkflow(
   const resolvedProvider = scope.provider;
   const resolvedModel = scope.model;
   const workflowPreset = scope.preset;
-  const providerSource = runOverrideAppliesToRef(resolvedModelOverrides, workflow.model)
+  const providerSource = runOverrideAppliesToRef(
+    resolvedModelOverrides,
+    workflow.model,
+    baseAiProfile
+  )
     ? 'run-override'
     : scope.providerOrigin === 'model ref'
       ? `model preset '${workflow.model ?? ''}'`

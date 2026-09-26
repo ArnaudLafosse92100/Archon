@@ -39,6 +39,8 @@
 # assistants: { <provider>: { ... } }    per-provider defaults for this run
 # tiers:      { small|medium|large: { provider, model, effort? } }
 # aliases:    { '@name': { provider, model, effort? } }
+# Portable workflow aliases have tier fallbacks unless explicitly configured:
+# @implementer/@reviewer/@adjudicator -> medium; @architect -> large.
 # docsPath:   <path>                     overrides the project docs path
 # envVars:    { KEY: value }             extra env for this run's nodes
 # workflows:  { autoResumeOnQuotaReset, quotaFallbackDelayMs,

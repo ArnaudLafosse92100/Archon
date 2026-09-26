@@ -493,6 +493,19 @@ describe('bundled-defaults', () => {
       expect(flipReady?.depends_on).toContain('validate');
     });
 
+    it('SDLC leaf workflows expose portable capability aliases', () => {
+      const plan = parseWorkflow(BUNDLED_WORKFLOWS['archon-plan'], 'archon-plan.yaml');
+      const implement = parseWorkflow(
+        BUNDLED_WORKFLOWS['archon-implement'],
+        'archon-implement.yaml'
+      );
+      if (plan.workflow === null) throw new Error(plan.error.error);
+      if (implement.workflow === null) throw new Error(implement.error.error);
+
+      expect(plan.workflow.model).toBe('@architect');
+      expect(implement.workflow.model).toBe('@implementer');
+    });
+
     it('archon-review exposes the three-way action contract behind a successful preflight', () => {
       const parsed = parseWorkflow(BUNDLED_WORKFLOWS['archon-review'], 'archon-review.yaml');
       if (parsed.workflow === null) throw new Error(parsed.error.error);
@@ -527,6 +540,7 @@ describe('bundled-defaults', () => {
       const synthesize = parsed.workflow.nodes.find(node => node.id === 'synthesize');
       expect(synthesize?.kind).toBe('agent');
       if (synthesize?.kind !== 'agent') throw new Error('synthesize is not an agent');
+      expect(synthesize.model).toBe('@adjudicator');
       expect(synthesize.depends_on).toEqual(['scope', 'review-complete']);
       expect(synthesize.trigger_rule).toBeUndefined();
       expect(synthesize.output_format).toMatchObject({
@@ -536,7 +550,7 @@ describe('bundled-defaults', () => {
         required: expect.arrayContaining(['action']),
       });
 
-      expect(parsed.workflow.model).toBe('medium');
+      expect(parsed.workflow.model).toBe('@reviewer');
       expect(parsed.workflow.inputs?.tests).toBeUndefined();
       expect(parsed.workflow.inputs?.comments).toBeUndefined();
       expect(parsed.workflow.inputs?.types).toBeUndefined();
