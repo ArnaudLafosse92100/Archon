@@ -319,8 +319,13 @@ export function getWorkflowFolderSearchPaths(): string[] {
  * the number of folder boundaries between `rootPath` and the file — so at
  * `maxDepth: 1`, files at `rootPath/file.md` (depth 0) and `rootPath/group/file.md`
  * (depth 1) are included, but `rootPath/group/sub/file.md` (depth 2) is not.
- * Default is `Infinity` (no cap) for backwards compatibility with callers that
- * want to copy arbitrary subtrees (e.g. clone handlers).
+ * Default is `Infinity` (no cap). Command consumers use `findCommandFiles`
+ * to apply the executable-command depth and duplicate-selection policy.
+ *
+ * Results are in a defined order: siblings are visited in code-unit order by
+ * name, and a directory's own results appear where that directory sorts among
+ * its siblings. Callers may rely on the order being the same on every machine
+ * and on every call; they must not sort again to obtain it.
  */
 export async function findMarkdownFilesRecursive(
   rootPath: string,
@@ -328,6 +333,19 @@ export async function findMarkdownFilesRecursive(
   options?: { maxDepth?: number }
 ): Promise<{ commandName: string; relativePath: string }[]> {
   return findMarkdownFilesRecursiveImpl(rootPath, relativePath, options, new Set<string>());
+}
+
+/** Discover executable commands in one scope: one folder deep, first name wins. */
+export async function findCommandFiles(
+  rootPath: string
+): ReturnType<typeof findMarkdownFilesRecursive> {
+  const entries = await findMarkdownFilesRecursive(rootPath, '', { maxDepth: 1 });
+  const seen = new Set<string>();
+  return entries.filter(({ commandName }) => {
+    if (seen.has(commandName)) return false;
+    seen.add(commandName);
+    return true;
+  });
 }
 
 function shouldSkipSymlinkTargetError(err: NodeJS.ErrnoException): boolean {
@@ -396,6 +414,14 @@ async function findMarkdownFilesRecursiveImpl(
     throw err;
   }
 
+  // `readdir` returns entries in filesystem order, which differs between
+  // machines and can differ between calls on one machine. Every consumer of
+  // this walk inherits that order, and `GET /api/commands` renders it to an
+  // operator. Order is defined once here, at the only owner, rather than at
+  // each call site. The comparison is on code units, not `localeCompare`,
+  // so the result does not vary with the host locale.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
   for (const entry of entries) {
     if (entry.name.startsWith('.') || entry.name === 'node_modules') {
       continue;
@@ -437,6 +463,17 @@ async function findMarkdownFilesRecursiveImpl(
 }
 
 /**
+ * Root of the checkout this build runs from.
+ *
+ * This file is at packages/paths/src/archon-paths.ts, so the repo root is three
+ * levels up from `import.meta.dir` (src → paths → packages → root). In Docker
+ * that is /app.
+ */
+function getSourceRepoRoot(): string {
+  return dirname(dirname(dirname(import.meta.dir)));
+}
+
+/**
  * Get the path to the app's base directory
  * This is where default commands/workflows are stored for copying to new repos
  *
@@ -444,11 +481,19 @@ async function findMarkdownFilesRecursiveImpl(
  * Locally: {repo_root}/.archon
  */
 export function getAppArchonBasePath(): string {
-  // This file is at packages/paths/src/archon-paths.ts
-  // Go up from src → paths → packages → repo root
-  // import.meta.dir = packages/paths/src
-  const repoRoot = dirname(dirname(dirname(import.meta.dir)));
-  return join(repoRoot, '.archon');
+  return join(getSourceRepoRoot(), '.archon');
+}
+
+/**
+ * Where a source checkout keeps its built web UI: the output of
+ * `bun run build:web`. Owns that location for every consumer, so the CLI's
+ * pre-flight check and the server's default cannot drift apart.
+ *
+ * A compiled binary has no checkout to build in and caches a downloaded copy
+ * under `getWebDistDir(version)` instead.
+ */
+export function getSourceWebDistDir(): string {
+  return join(getSourceRepoRoot(), 'packages', 'web', 'dist');
 }
 
 /**
@@ -577,7 +622,7 @@ export function getRunArtifactsPath(owner: string, repo: string, workflowRunId: 
  * Returns: ~/.archon/workspaces/owner/repo/logs/{id}.jsonl
  */
 export function getRunLogPath(owner: string, repo: string, workflowRunId: string): string {
-  return join(getProjectLogsPath(owner, repo), `${workflowRunId}.jsonl`);
+  return getRunLogPathForRoot(getProjectRoot(owner, repo), workflowRunId);
 }
 
 /**
@@ -637,8 +682,8 @@ export type ProjectStorageKey =
   | { kind: 'cwd'; cwd: string };
 
 /**
- * The four output roots every project kind has. Composed from one project root
- * so the tree is identical no matter which key resolved it.
+ * The output roots every project kind has. Composed from one project root so
+ * the tree is identical no matter which key resolved it.
  */
 export interface ProjectStoragePaths {
   /** `~/.archon/workspaces/<...>/` — the project root all output hangs off. */
@@ -649,6 +694,15 @@ export interface ProjectStoragePaths {
   logsDir: string;
   /** `$STATE_DIR` — per-PROJECT cross-run state, shared by every workflow. */
   stateRoot: string;
+  /**
+   * Parent of the `runs/<run-id>/` layout holding each run's frozen workflow source.
+   *
+   * A sibling of `artifactsRoot`, deliberately not inside it: `$ARTIFACTS_DIR` is the
+   * run's output channel, handed to every node and listed for humans, and the frozen
+   * pack is neither an output nor something a node should be able to reach by that
+   * path.
+   */
+  workflowSourceRoot: string;
 }
 
 /**
@@ -741,6 +795,22 @@ export function isInsideArchonHome(candidate: string): boolean {
 }
 
 /**
+ * Resolve the durable project root for a persisted run.
+ *
+ * A trusted persisted root preserves the run's original project identity. An
+ * out-of-tree root is stale or corrupt, so readers re-derive the project under
+ * the current ARCHON_HOME when the run still has a codebase row.
+ */
+export function resolveRunStorageRoot(
+  run: { output_root?: string | null },
+  codebase: { kind?: string | null; name: string; default_cwd: string } | null | undefined
+): string | null {
+  if (run.output_root && isInsideArchonHome(run.output_root)) return run.output_root;
+  if (!codebase?.name) return null;
+  return getProjectStoragePaths(resolveProjectStorageKey(codebase, codebase.default_cwd)).root;
+}
+
+/**
  * Compose the output roots from an already-resolved project root — the branch
  * taken when a run recorded its `output_root` at start and must NOT re-derive
  * identity (a renamed codebase would otherwise orphan its artifacts, #1192).
@@ -757,6 +827,7 @@ export function getStoragePathsForRoot(root: string): ProjectStoragePaths {
     artifactsRoot: join(root, 'artifacts'),
     logsDir: join(root, 'logs'),
     stateRoot: join(root, 'state'),
+    workflowSourceRoot: join(root, 'workflow-source'),
   };
 }
 
@@ -781,6 +852,20 @@ export function getRunArtifactsDirForKey(key: ProjectStorageKey, workflowRunId: 
  */
 export function getRunArtifactsDirForRoot(root: string, workflowRunId: string): string {
   return join(getStoragePathsForRoot(root).artifactsRoot, 'runs', workflowRunId);
+}
+
+/** Get a run's JSONL transcript from an already-resolved project root. */
+export function getRunLogPathForRoot(root: string, workflowRunId: string): string {
+  return join(getStoragePathsForRoot(root).logsDir, `${workflowRunId}.jsonl`);
+}
+
+/**
+ * Get a run's frozen workflow source directory from an already-resolved project root:
+ * `<workflowSourceRoot>/runs/<id>`. The same `runs/<id>` shape as artifacts, keyed by
+ * the same run id, so one run's source and output are siblings under one project.
+ */
+export function getRunWorkflowSourceDirForRoot(root: string, workflowRunId: string): string {
+  return join(getStoragePathsForRoot(root).workflowSourceRoot, 'runs', workflowRunId);
 }
 
 // =============================================================================

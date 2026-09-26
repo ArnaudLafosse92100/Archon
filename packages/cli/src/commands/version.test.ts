@@ -71,4 +71,60 @@ describe('versionCommand', () => {
     const buildCall = consoleSpy.mock.calls[2][0] as string;
     expect(buildCall).toContain('source (bun)');
   });
+
+  it('outputs the exact revision and fixed node failure contract as JSON', async () => {
+    const revision = 'abc1234567890abc1234567890abc1234567890a';
+    execSpy.mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: '' });
+
+    await versionCommand(true);
+
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(consoleSpy.mock.calls[0][0] as string)).toEqual(
+      expect.objectContaining({
+        revision,
+        capabilities: ['archon-auth-context-v1', 'codegraph_managed_v1'],
+        contracts: {
+          'node_failed.data.error_class': {
+            version: 1,
+            values: ['fatal', 'transient', 'unknown'],
+          },
+          'workflow.credential_policy.codex': {
+            version: 1,
+            requiredKinds: ['subscription'],
+            evidence: 'local_credential_resolution',
+          },
+          'workflow.credential_policy.claude': {
+            version: 1,
+            requiredKinds: ['subscription'],
+            evidence: 'local_credential_resolution',
+          },
+          'workflow.provider_launch_attestation': {
+            version: 1,
+            evidence: 'local_launch_preparation',
+            envPolicy: 'targeted_empty_overrides',
+            aliasSemantics: 'neutralized_not_absent',
+            strictClaudeNeutralizedAliases: expect.arrayContaining([
+              'ANTHROPIC_API_KEY',
+              'CLAUDE_API_KEY',
+              'ANTHROPIC_AUTH_TOKEN',
+              'ANTHROPIC_BASE_URL',
+              'CLAUDE_CODE_API_BASE_URL',
+              'CLAUDE_CODE_USE_BEDROCK',
+              'CLAUDE_CODE_USE_VERTEX',
+              'CLAUDE_CODE_USE_FOUNDRY',
+              'ANTHROPIC_BEDROCK_BASE_URL',
+              'ANTHROPIC_VERTEX_BASE_URL',
+              'ANTHROPIC_FOUNDRY_BASE_URL',
+            ]),
+            billingClaim: 'unverified',
+          },
+        },
+      })
+    );
+    expect(execSpy).toHaveBeenCalledWith(
+      'git',
+      ['rev-parse', 'HEAD'],
+      expect.objectContaining({ cwd: expect.any(String) })
+    );
+  });
 });

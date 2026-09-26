@@ -23,6 +23,60 @@ mock.module('@archon/paths', () => ({
 import { mapWorkflowEvent } from './workflow-bridge';
 import type { WorkflowEmitterEvent } from '@archon/workflows/event-emitter';
 
+test('workflow start projection does not expose the host transcript path', () => {
+  const event: WorkflowEmitterEvent = {
+    type: 'workflow_started',
+    runId: 'run-1',
+    workflowName: 'implement',
+    conversationId: 'conv-1',
+    transcriptPath: '/host/.archon/workspaces/acme/widget/logs/run-1.jsonl',
+  };
+
+  const payload = JSON.parse(mapWorkflowEvent(event) ?? '{}') as Record<string, unknown>;
+  expect(payload).toMatchObject({ type: 'workflow_status', runId: 'run-1', status: 'running' });
+  expect(payload).not.toHaveProperty('transcriptPath');
+});
+
+test('node skip projection preserves the live skip cause', () => {
+  const event: WorkflowEmitterEvent = {
+    type: 'node_skipped',
+    runId: 'run-1',
+    nodeId: 'publish',
+    nodeName: 'Publish',
+    reason: 'trigger_rule',
+    cause: { kind: 'upstream_failed', origin: 'validate' },
+  };
+
+  expect(JSON.parse(mapWorkflowEvent(event) ?? '{}')).toMatchObject({
+    type: 'dag_node',
+    runId: 'run-1',
+    nodeId: 'publish',
+    status: 'skipped',
+    reason: 'trigger_rule',
+    cause: { kind: 'upstream_failed', origin: 'validate' },
+  });
+});
+
+test('timeout skip projection preserves the live timeout cause', () => {
+  const event: WorkflowEmitterEvent = {
+    type: 'node_skipped',
+    runId: 'run-1',
+    nodeId: 'ci-note',
+    nodeName: 'CI note',
+    reason: 'timeout',
+    cause: { kind: 'timeout' },
+  };
+
+  expect(JSON.parse(mapWorkflowEvent(event) ?? '{}')).toMatchObject({
+    type: 'dag_node',
+    runId: 'run-1',
+    nodeId: 'ci-note',
+    status: 'skipped',
+    reason: 'timeout',
+    cause: { kind: 'timeout' },
+  });
+});
+
 describe('mapWorkflowEvent — tool activity correlation', () => {
   test('forwards tool call IDs and completion metadata', () => {
     const started: WorkflowEmitterEvent = {

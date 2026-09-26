@@ -11,6 +11,7 @@ import { isAbsolute, join, normalize as normalizePath, resolve, sep } from 'path
 import { createLogger } from '@archon/paths';
 import {
   execFileAsync,
+  fetchWithRefLockRetry,
   findWorktreeByBranch,
   getCanonicalRepoPath,
   getCurrentBranchStrict,
@@ -29,7 +30,7 @@ import {
 } from '@archon/git';
 import type { WorktreeBaseOverride } from '@archon/git';
 import { getArchonWorkspacesPath } from '@archon/paths';
-import type { RepoPath, WorktreeInfo } from '@archon/git';
+import type { BranchName, RepoPath, WorktreeInfo } from '@archon/git';
 import { copyWorktreeFiles } from '../worktree-copy';
 import type {
   DestroyResult,
@@ -61,6 +62,14 @@ function getLog(): ReturnType<typeof createLogger> {
 interface GitCommandAnchors {
   active: RepoPath;
   durable: RepoPath;
+}
+
+type WorktreeCreationResult =
+  | { kind: 'created'; warnings: string[] }
+  | { kind: 'adopted'; environment: WorktreeEnvironment };
+
+function getForkReviewBranch(prNumber: string): BranchName {
+  return toBranchName(`pr-${prNumber}-review`);
 }
 
 async function getGitCommandAnchors(path: string): Promise<GitCommandAnchors> {
@@ -183,21 +192,28 @@ export class WorktreeProvider implements IIsolationProvider {
     }
 
     // Create new worktree (re-uses the already-loaded repoConfig — no double load).
-    const { warnings } = await this.createWorktree(request, worktreePath, branchName, repoConfig);
+    const creation = await this.createWorktree(request, worktreePath, branchName, repoConfig);
+    if (creation.kind === 'adopted') {
+      return creation.environment;
+    }
 
     const existingTaskBranch =
       request.workflowType === 'task' && request.taskBranch?.kind === 'existing';
+    const checkedOutBranch =
+      isPRIsolationRequest(request) && request.isForkPR
+        ? getForkReviewBranch(request.identifier)
+        : branchName;
     return {
       id: envId,
       provider: 'worktree',
       workingPath: worktreePath,
-      branchName,
+      branchName: checkedOutBranch,
       status: 'active',
       createdAt: new Date(),
       metadata: existingTaskBranch
         ? { adopted: true, adoptedFrom: 'branch', request }
         : { adopted: false, request },
-      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(creation.warnings.length > 0 ? { warnings: creation.warnings } : {}),
     };
   }
 
@@ -654,6 +670,11 @@ export class WorktreeProvider implements IIsolationProvider {
       request.workflowType === 'task' && request.taskBranch?.kind === 'existing'
         ? request.taskBranch.branch
         : undefined;
+    const exactBranch = isPRIsolationRequest(request)
+      ? request.isForkPR
+        ? getForkReviewBranch(request.identifier)
+        : request.prBranch
+      : exactTaskBranch;
     // Check if worktree already exists at expected path
     if (await worktreeExists(toWorktreePath(worktreePath))) {
       // Verify the existing worktree belongs to the same repo root before
@@ -678,58 +699,64 @@ export class WorktreeProvider implements IIsolationProvider {
         throw err;
       }
 
-      if (exactTaskBranch) {
+      if (exactBranch) {
         const actualBranch = await getCurrentBranchStrict(toWorktreePath(worktreePath));
-        if (actualBranch !== exactTaskBranch) {
+        if (actualBranch !== exactBranch) {
           throw new Error(
             `Cannot adopt worktree at '${worktreePath}': expected branch ` +
-              `'${exactTaskBranch}', found '${actualBranch ?? 'detached HEAD'}'.`
+              `'${exactBranch}', found '${actualBranch ?? 'detached HEAD'}'.`
           );
         }
       }
 
-      getLog().info({ worktreePath, branchName }, 'worktree_adopted');
-      return this.buildAdoptedEnvironment(worktreePath, branchName, request);
+      const adoptedBranch = exactBranch ?? toBranchName(branchName);
+      getLog().info({ worktreePath, branchName: adoptedBranch }, 'worktree_adopted');
+      return this.buildAdoptedEnvironment(worktreePath, adoptedBranch, request);
     }
 
     // Exact-branch requests also search Git's registered worktrees because an
     // external tool may have created the checkout at a non-Archon path.
-    const exactBranch = isPRIsolationRequest(request) ? request.prBranch : exactTaskBranch;
     if (exactBranch) {
-      const existingByBranch = exactTaskBranch
-        ? ((await listWorktrees(request.canonicalRepoPath)).find(
-            worktree => worktree.branch === exactTaskBranch
-          )?.path ?? null)
-        : await findWorktreeByBranch(request.canonicalRepoPath, exactBranch);
-      if (existingByBranch) {
-        // Same cross-clone guard as the primary adoption path above — a
-        // worktree matching the PR branch might still belong to a different
-        // clone of the same remote.
-        try {
-          await verifyWorktreeOwnership(existingByBranch, request.canonicalRepoPath);
-        } catch (err) {
-          getLog().warn(
-            {
-              worktreePath: existingByBranch,
-              branchName: exactBranch,
-              codebaseId: request.codebaseId,
-              canonicalRepoPath: request.canonicalRepoPath,
-              err: (err as Error).message,
-            },
-            'worktree.adoption_refused_cross_checkout'
-          );
-          throw err;
-        }
-
-        getLog().info(
-          { worktreePath: existingByBranch, branchName: exactBranch },
-          'worktree_adopted'
-        );
-        return this.buildAdoptedEnvironment(existingByBranch, exactBranch, request, 'branch');
-      }
+      const requireExactBranch =
+        exactTaskBranch !== undefined || (isPRIsolationRequest(request) && request.isForkPR);
+      return this.findRegisteredWorktree(request, exactBranch, requireExactBranch);
     }
 
     return null;
+  }
+
+  private async findRegisteredWorktree(
+    request: IsolationRequest,
+    branchName: BranchName,
+    requireExactBranch = false
+  ): Promise<WorktreeEnvironment | null> {
+    const worktreePath = requireExactBranch
+      ? ((await listWorktrees(request.canonicalRepoPath)).find(
+          worktree => worktree.branch === branchName
+        )?.path ?? null)
+      : await findWorktreeByBranch(request.canonicalRepoPath, branchName);
+    if (!worktreePath) {
+      return null;
+    }
+
+    try {
+      await verifyWorktreeOwnership(worktreePath, request.canonicalRepoPath);
+    } catch (err) {
+      getLog().warn(
+        {
+          worktreePath,
+          branchName,
+          codebaseId: request.codebaseId,
+          canonicalRepoPath: request.canonicalRepoPath,
+          err: (err as Error).message,
+        },
+        'worktree.adoption_refused_cross_checkout'
+      );
+      throw err;
+    }
+
+    getLog().info({ worktreePath, branchName }, 'worktree_adopted');
+    return this.buildAdoptedEnvironment(worktreePath, branchName, request, 'branch');
   }
 
   private buildAdoptedEnvironment(
@@ -751,7 +778,8 @@ export class WorktreeProvider implements IIsolationProvider {
 
   /**
    * Create the actual worktree.
-   * Returns warnings that should be surfaced to the user (non-fatal issues).
+   * Returns either the newly created worktree's warnings or a worktree adopted
+   * after a concurrent creator won the same branch.
    *
    * `repoConfig` is the already-loaded config from `create()`. Receiving it here
    * keeps the work of each public entrypoint tied to exactly one config load —
@@ -762,7 +790,7 @@ export class WorktreeProvider implements IIsolationProvider {
     worktreePath: string,
     branchName: string,
     worktreeConfig: WorktreeCreateConfig | null
-  ): Promise<{ warnings: string[] }> {
+  ): Promise<WorktreeCreationResult> {
     const repoPath = request.canonicalRepoPath;
 
     const override: WorktreeBaseOverride = {
@@ -794,7 +822,10 @@ export class WorktreeProvider implements IIsolationProvider {
 
       if (isPRIsolationRequest(request)) {
         // For PRs: fetch and checkout the PR branch (actual or synthetic)
-        await this.createFromPR(request, worktreePath, remote);
+        const adopted = await this.createFromPR(request, worktreePath, remote);
+        if (adopted) {
+          return { kind: 'adopted', environment: adopted };
+        }
       } else {
         // For issues, tasks, threads: create new branch
         await this.createNewBranch(request, repoPath, worktreePath, branchName, baseBranch, remote);
@@ -830,7 +861,7 @@ export class WorktreeProvider implements IIsolationProvider {
         'Config file could not be loaded — copyFiles configuration was not applied. Check your .archon/config.yaml for syntax errors.'
       );
     }
-    return { warnings };
+    return { kind: 'created', warnings };
   }
 
   /**
@@ -1063,7 +1094,7 @@ export class WorktreeProvider implements IIsolationProvider {
     request: PRIsolationRequest,
     worktreePath: string,
     remote = 'origin'
-  ): Promise<void> {
+  ): Promise<WorktreeEnvironment | null> {
     // Clean up any orphan directory before creating worktree
     await this.cleanOrphanDirectoryIfExists(worktreePath);
 
@@ -1076,8 +1107,9 @@ export class WorktreeProvider implements IIsolationProvider {
         await this.createFromSameRepoPR(repoPath, worktreePath, request.prBranch, remote);
       } else {
         // Fork PR: Use synthetic review branch
-        await this.createFromForkPR(repoPath, worktreePath, prNumber, remote, request.prSha);
+        return await this.createFromForkPR(request, worktreePath, remote);
       }
+      return null;
     } catch (error) {
       // Clean up orphaned git-registered worktree from partial failure
       // (e.g., worktree add succeeded but createBranchWithStaleRetry failed)
@@ -1096,10 +1128,25 @@ export class WorktreeProvider implements IIsolationProvider {
     prBranch: string,
     remote = 'origin'
   ): Promise<void> {
-    // Fetch the PR's actual branch
-    await execFileAsync('git', ['-C', repoPath, 'fetch', remote, prBranch], {
-      timeout: GIT_OPERATION_TIMEOUT_MS,
-    });
+    // Fetch the PR's actual branch. Delegate to syncWorkspace so the bounded
+    // ref-lock retry lives in one place — concurrent same-repo launches collide
+    // on Git's shared remote-tracking ref lock file, and the @archon/git owner
+    // already owns the predicate and backoff.
+    try {
+      await syncWorkspace(toRepoPath(repoPath), toBranchName(prBranch), {
+        mode: 'fetch-only',
+        remote,
+      });
+    } catch (error) {
+      const err = error as Error;
+      // syncWorkspace wraps fetch errors as
+      // `Sync fetch from <remote>/<branch> failed: <original>`. Strip that
+      // wrapper so the inner wrap keeps `Fetch <remote>/<branch> failed: <original>`
+      // and operators can still distinguish fetch failures from worktree-add
+      // failures inside the surrounding `createFromPR` prefix.
+      const original = err.message.replace(/^Sync fetch from .+? failed: /, '');
+      throw new Error(`Fetch ${remote}/${prBranch} failed: ${original}`);
+    }
 
     // Try to create worktree with the branch
     try {
@@ -1138,19 +1185,23 @@ export class WorktreeProvider implements IIsolationProvider {
    * Create worktree for fork PR using synthetic review branch
    *
    * Handles stale branches: If a branch already exists from a previous worktree
-   * that was deleted, we delete the stale branch and retry.
+   * that was deleted, we delete the stale branch and retry. The no-SHA fetch
+   * retries transient ref-lock races via fetchWithRefLockRetry.
    */
   private async createFromForkPR(
-    repoPath: string,
+    request: PRIsolationRequest,
     worktreePath: string,
-    prNumber: string,
-    remote = 'origin',
-    prSha?: string
-  ): Promise<void> {
-    const reviewBranch = `pr-${prNumber}-review`;
+    remote = 'origin'
+  ): Promise<WorktreeEnvironment | null> {
+    const repoPath = request.canonicalRepoPath;
+    const prNumber = request.identifier;
+    const reviewBranch = getForkReviewBranch(prNumber);
+    const prSha = request.prSha;
 
     if (prSha) {
-      // SHA provided: create at specific commit for reproducible reviews
+      // SHA provided: create at specific commit for reproducible reviews.
+      // No colon refspec: git writes only FETCH_HEAD and locks no named ref,
+      // so this fetch cannot hit the ref-lock race and needs no retry.
       await execFileAsync('git', ['-C', repoPath, 'fetch', remote, `pull/${prNumber}/head`], {
         timeout: GIT_OPERATION_TIMEOUT_MS,
       });
@@ -1169,22 +1220,48 @@ export class WorktreeProvider implements IIsolationProvider {
         reviewBranch
       );
     } else {
-      // No SHA: fetch and create review branch
+      // No SHA: fetch and create review branch. The refspec's destination is the
+      // local branch refs/heads/pr-<n>-review, so concurrent fork-PR launches
+      // race on its ref lock; fetchWithRefLockRetry owns the bounded retry.
       await this.createBranchWithStaleRetry(
         repoPath,
-        () =>
-          execFileAsync(
-            'git',
-            ['-C', repoPath, 'fetch', remote, `pull/${prNumber}/head:${reviewBranch}`],
-            { timeout: GIT_OPERATION_TIMEOUT_MS }
-          ),
+        async () => {
+          try {
+            return await fetchWithRefLockRetry(
+              toRepoPath(repoPath),
+              remote,
+              `pull/${prNumber}/head:${reviewBranch}`,
+              { timeoutMs: GIT_OPERATION_TIMEOUT_MS }
+            );
+          } catch (error) {
+            const err = error as Error & { stderr?: string };
+            const wrapped = new Error(
+              `Fetch ${remote} pull/${prNumber}/head:${reviewBranch} failed: ${err.message}`
+            ) as Error & { stderr?: string };
+            // createBranchWithStaleRetry keys on stderr for its stale-branch retry
+            wrapped.stderr = err.stderr;
+            throw wrapped;
+          }
+        },
         reviewBranch
       );
 
-      await execFileAsync('git', ['-C', repoPath, 'worktree', 'add', worktreePath, reviewBranch], {
-        timeout: GIT_OPERATION_TIMEOUT_MS,
-      });
+      try {
+        await execFileAsync(
+          'git',
+          ['-C', repoPath, 'worktree', 'add', worktreePath, reviewBranch],
+          { timeout: GIT_OPERATION_TIMEOUT_MS }
+        );
+      } catch (error) {
+        const adopted = await this.findRegisteredWorktree(request, reviewBranch, true);
+        if (adopted) {
+          return adopted;
+        }
+        throw error;
+      }
     }
+
+    return null;
   }
 
   /**

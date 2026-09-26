@@ -3,9 +3,9 @@
 # Run with --default-stubs --exec-code.
 #
 # `outcome` is deliberately unstubbed: the real script runs and must report pull
-# request 7 from the delivered record alone. The exec workspace is a DETACHED
+# request 7 from the delivered flip value alone. The exec workspace is a DETACHED
 # worktree, so there is no current branch for an ambient pull request lookup to
-# resolve — a pass here is proof the report is built from the record and nothing
+# resolve — a pass here is proof the report is built from the delivered value and nothing
 # the checkout happens to be sitting on.
 assess:
   action: update
@@ -21,7 +21,11 @@ deliver__review__synthesize:
   action: none
   findings_summary: "stub: no open findings"
 deliver__review-action: '{"ready":true,"action":"none"}'
+deliver__validate__applicability: { fingerprint: fixture, scope: "", context: "", validator: fixture, generation: 1, reason: fixture, nonce: fixture, reuse: false }
 deliver__validate__validate:
+  green: true
+  summary: "stub: project gate green"
+deliver__validate__selected-verdict:
   green: true
   summary: "stub: project gate green"
 ci-probe: '{"state":"concluded","detail":"all checks green"}'
@@ -32,6 +36,7 @@ deliver__classify:
     errors: "stub: no failure paths"
     docs: "stub: no doc-facing changes"
 deliver__resolve-scope: '{"errors":"false"}'
+deliver__validate__record-evidence: '{"recorded":true}'
 fixture:
   expect: completed
 exec-code: true
@@ -40,9 +45,10 @@ deliver__impl__record-start: '{"start":"recorded"}'
 deliver__gate-validated: '{"gate":"green"}'
 deliver__impl__assert-changed: "2 files changed"
 deliver__gate-green: '{"gate":"green"}'
+deliver__ci-verdict: '{"state":"concluded","detail":"all checks green"}'
 deliver__flip-ready: "https://github.com/example/repo/pull/7"
 deliver__outcome: "https://github.com/example/repo/pull/7"
-deliver__pr__pr: { number: 7, url: "https://github.com/example/repo/pull/7", head: "fixture-branch", base: "dev", is_draft: true }
+deliver__pr__pr: { repo: { host: "github.com", path: "example/repo" }, number: 7, url: "https://github.com/example/repo/pull/7", head: "fixture-branch", base: "dev", is_draft: true }
 deliver__review__mode: '{"continuation":false}'
 deliver__review__scope: "PR diff in scope; head sha stubbed"
 deliver__review__code: "0 findings"

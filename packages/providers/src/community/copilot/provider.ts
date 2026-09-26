@@ -34,7 +34,7 @@ import { resolveSkillDirectories } from '../../shared/skills';
 import { augmentPromptForJsonSchema } from '../../shared/structured-output';
 import { COPILOT_CAPABILITIES } from './capabilities';
 import { COPILOT_EFFORTS, parseCopilotConfig, type CopilotProviderDefaults } from './config';
-import { clampEffort } from '../../shared/effort';
+import { clampEffort } from '@archon/paths/effort';
 import { resolveCopilotBinaryPath } from './binary-resolver';
 import { bridgeSession } from './event-bridge';
 
@@ -123,52 +123,21 @@ function normalizeReasoning(value: unknown): CopilotReasoningEffort | undefined 
 }
 
 /**
- * Resolve Copilot's `reasoningEffort` from Archon's workflow inputs.
- * Precedence:
- *   nodeConfig.thinking > nodeConfig.effort > config.modelReasoningEffort
- *
- * Copilot's SDK covers only `low` through `xhigh`, so `max`/`ultra` clamp to
- * `xhigh` and `minimal` to `low` (see `clampEffort`). The `'off'` sentinel
- * disables reasoning. The object form of `thinking` (Claude-specific) returns
- * a warning.
+ * Resolve Copilot's `reasoningEffort` from the node or assistant default.
  */
 function resolveCopilotReasoning(
   nodeConfig: SendQueryOptions['nodeConfig'] | undefined,
   copilotConfig: CopilotProviderDefaults
 ): { effort: CopilotReasoningEffort | undefined; warning?: string } {
-  if (!nodeConfig) {
-    return { effort: copilotConfig.modelReasoningEffort };
-  }
-
-  const rawThinking = nodeConfig.thinking;
-  const rawEffort = nodeConfig.effort;
-
-  if (rawThinking === 'off' || rawEffort === 'off') return { effort: undefined };
-
-  const fromThinking = normalizeReasoning(rawThinking);
-  if (fromThinking) return { effort: fromThinking };
-
-  const fromEffort = normalizeReasoning(rawEffort);
-  if (fromEffort) return { effort: fromEffort };
-
-  if (rawThinking !== undefined && rawThinking !== null && typeof rawThinking === 'object') {
+  const declared = nodeConfig?.effort ?? copilotConfig.modelReasoningEffort;
+  const effort = normalizeReasoning(declared);
+  if (declared !== undefined && effort === undefined) {
     return {
       effort: undefined,
-      warning:
-        'Copilot ignored `thinking` (object form is Claude-specific). Use `effort: minimal|low|medium|high|xhigh|max|ultra` instead.',
+      warning: `Copilot ignored invalid effort '${declared}'.`,
     };
   }
-
-  if (typeof rawThinking === 'string' || typeof rawEffort === 'string') {
-    const offender = typeof rawThinking === 'string' ? rawThinking : rawEffort;
-    return {
-      effort: undefined,
-      warning: `Copilot ignored unknown reasoning level '${String(offender)}'. Valid: minimal, low, medium, high, xhigh, max, ultra, off.`,
-    };
-  }
-
-  // Fall back to config-level default when nodeConfig provides nothing actionable.
-  return { effort: copilotConfig.modelReasoningEffort };
+  return { effort };
 }
 
 // ─── System prompt ──────────────────────────────────────────────────────────
@@ -220,18 +189,31 @@ async function applyMcpServers(
   warnings: ProviderWarning[]
 ): Promise<void> {
   const mcpPath = nodeConfig?.mcp;
-  if (typeof mcpPath !== 'string' || mcpPath.length === 0) return;
-
-  const { servers, serverNames, missingVars } = await loadMcpConfig(mcpPath, cwd);
-
-  if (missingVars.length > 0) {
-    warnings.push({
-      code: 'copilot.mcp_env_vars_missing',
-      message: `Copilot MCP config references undefined env vars: ${missingVars.join(', ')}. Servers using them may fail at runtime.`,
-    });
+  let servers: Record<string, unknown> = {};
+  let serverNames: string[] = [];
+  let missingVars: string[] = [];
+  if (typeof mcpPath === 'string' && mcpPath.length > 0) {
+    const loaded = await loadMcpConfig(mcpPath, cwd);
+    servers = loaded.servers;
+    serverNames = loaded.serverNames;
+    missingVars = loaded.missingVars;
+    if (missingVars.length > 0) {
+      warnings.push({
+        code: 'copilot.mcp_env_vars_missing',
+        message: `Copilot MCP config references undefined env vars: ${missingVars.join(', ')}. Servers using them may fail at runtime.`,
+      });
+    }
   }
 
-  sessionConfig.mcpServers = servers as Record<string, MCPServerConfig>;
+  const managed = nodeConfig?.managedMcpServers ?? {};
+  const collision = Object.keys(managed).find(name => name in servers);
+  if (collision) {
+    throw new Error(`Managed MCP server '${collision}' conflicts with node MCP configuration.`);
+  }
+  const merged = { ...servers, ...managed };
+  if (Object.keys(merged).length === 0) return;
+  sessionConfig.mcpServers = merged as Record<string, MCPServerConfig>;
+  serverNames = [...serverNames, ...Object.keys(managed)];
   getLog().info({ serverNames, missingVars }, 'copilot.mcp_loaded');
 }
 

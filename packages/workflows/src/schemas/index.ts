@@ -25,6 +25,9 @@ export {
 } from './hooks';
 export type { WorkflowHookEvent, WorkflowHookMatcher, WorkflowNodeHooks } from './hooks';
 
+export { effortLevelSchema, EFFORT_LEVELS } from './effort';
+export type { EffortLevel } from './effort';
+
 // Model binding profiles and durable run metadata
 export {
   TIER_NAMES,
@@ -106,6 +109,8 @@ export {
   isWorkflowNode,
   isComposeFanOutNode,
   isIncludeDirective,
+  ignoredFieldsForNode,
+  isOutputFormatEnforced,
   isPersistableNode,
   isNodeContextResume,
   isTriggerRule,
@@ -121,8 +126,6 @@ export {
   KNOWN_NODE_NESTED_KEYS,
   approvalConfigSchema,
   dagNodeFlatSchema,
-  effortLevelSchema,
-  thinkingConfigSchema,
   sandboxSettingsSchema,
   agentDefinitionSchema,
   piNodeConfigSchema,
@@ -151,8 +154,6 @@ export type {
   ComposeFanOutNode,
   FanOutConfig,
   DagNode,
-  EffortLevel,
-  ThinkingConfig,
   SandboxSettings,
   AgentDefinition,
   PiNodeConfig,
@@ -190,6 +191,8 @@ export {
   scheduledWorkflowResumeSchema,
   workflowStepStatusSchema,
   nodeStateSchema,
+  skipCauseSchema,
+  nodeSkipReasonSchema,
   nodeOutputSchema,
   workflowRunSchema,
   artifactTypeSchema,
@@ -211,8 +214,8 @@ export {
   RUN_METADATA_KEYS,
   readIdentityUnresolved,
   WORKFLOW_SOURCE_METADATA_KEY,
+  workflowSourceConfigSchema,
   workflowSourceMetadataSchema,
-  readWorkflowSourceMetadata,
   readWorkflowSourceState,
   CONTINUATION_METADATA_KEY,
   readContinuationMode,
@@ -222,10 +225,13 @@ export type {
   WorkflowRunOutcome,
   WorkflowStepStatus,
   NodeState,
+  SkipCause,
+  NodeSkipReason,
   NodeOutput,
   WorkflowRun,
   ArtifactType,
   ApprovalContext,
+  WorkflowAttentionWaitContext,
   WorkflowWaitContext,
   ScheduledWorkflowResume,
   SuspendReason,
@@ -236,6 +242,7 @@ export type {
   GateAddress,
   LoopGateRunMetadata,
   WorkflowSourceMetadata,
+  WorkflowSourceConfig,
   WorkflowSourceState,
   ContinuationMode,
 } from './workflow-run';
@@ -258,6 +265,8 @@ export type {
   WorkflowExecutionResult,
   WorkflowLoadError,
   WorkflowLoadResult,
+  GraphPlan,
+  ResolvedWorkflow,
   WorkflowSource,
   WorkflowWithSource,
   DeclaredWorkflowConfig,

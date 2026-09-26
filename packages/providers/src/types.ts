@@ -1,6 +1,69 @@
-// CONTRACT LAYER — no SDK imports, no runtime deps.
+// CONTRACT LAYER — no SDK imports, no runtime deps beyond SDK-free foundations.
 // @archon/workflows and @archon/core import from this subpath (@archon/providers/types).
-// HARD RULE: This file must never import SDK packages or other @archon/* packages.
+// HARD RULE: This file must never import SDK packages.
+
+import type { EffortRung } from '@archon/paths/effort';
+
+/**
+ * Authentication and routing inputs that must be neutralized for a strict
+ * Claude subscription launch. This list is pinned to the Claude Code binary
+ * shipped by @anthropic-ai/claude-agent-sdk 0.3.251 (Claude Code 2.1.251).
+ * Keep preparation, provider enforcement, attestation, and regression fixtures
+ * on this single source of truth.
+ */
+export const STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS = [
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_AWS_API_KEY',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'AGENT_PROXY_AUTH_TOKEN',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+  'CLAUDE_CODE_HOST_CREDS_FILE',
+  'CLAUDE_CODE_HFI_BEARER_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_SESSION_ACCESS_TOKEN',
+  'CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR',
+  'CLAUDE_BRIDGE_OAUTH_TOKEN',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_GATEWAY',
+  'CLAUDE_CODE_SKIP_BEDROCK_AUTH',
+  'CLAUDE_CODE_SKIP_VERTEX_AUTH',
+  'CLAUDE_CODE_SKIP_FOUNDRY_AUTH',
+  'CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH',
+  'CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH',
+  'CLAUDE_CODE_SKIP_MANTLE_AUTH',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CODE_API_BASE_URL',
+  'CLAUDE_CODE_GB_BASE_URL',
+  '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL',
+  'ANTHROPIC_AWS_BASE_URL',
+  'ANTHROPIC_BEDROCK_BASE_URL',
+  'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+  'ANTHROPIC_GOOGLE_CLOUD_BASE_URL',
+  'ANTHROPIC_VERTEX_BASE_URL',
+  'ANTHROPIC_FOUNDRY_BASE_URL',
+  'ANTHROPIC_UNIX_SOCKET',
+  'AWS_ENDPOINT_URL',
+  'AWS_ENDPOINT_URL_STS',
+  'AGENT_PROXY_URL',
+  'CLAUDE_BRIDGE_BASE_URL',
+  'CLAUDE_CODE_CUSTOM_OAUTH_URL',
+  'CLAUDE_LOCAL_OAUTH_API_BASE',
+  'CLAUDE_LOCAL_OAUTH_APPS_BASE',
+  'CLAUDE_LOCAL_OAUTH_CONSOLE_BASE',
+  'USE_LOCAL_OAUTH',
+  'USE_STAGING_OAUTH',
+] as const;
 
 // ─── Provider Config Defaults ──────────────────────────────────────────────
 // Canonical definitions — @archon/core/config/config-types.ts imports from here.
@@ -26,10 +89,7 @@ export interface ClaudeProviderDefaults {
 export interface CodexProviderDefaults {
   [key: string]: unknown;
   model?: string;
-  /** The Codex SDK's `ModelReasoningEffort`, restated by hand because this file
-   *  may not import an SDK. `CODEX_EFFORTS` in ./codex/config.ts pins the same
-   *  values to the SDK's own type, so upstream drift fails type-check there. */
-  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  modelReasoningEffort?: EffortRung;
   /** Structurally matches @archon/workflows WebSearchMode */
   webSearchMode?: 'disabled' | 'cached' | 'live';
   additionalDirectories?: string[];
@@ -49,7 +109,7 @@ export interface CopilotProviderDefaults {
    * mirrors `CodexProviderDefaults.modelReasoningEffort` so users get one
    * consistent key across cross-provider configs.
    */
-  modelReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  modelReasoningEffort?: EffortRung;
   /**
    * Absolute path to the Copilot CLI binary. Required in compiled Archon
    * builds when `COPILOT_BIN_PATH` env var is not set. Dev-mode builds let
@@ -539,6 +599,13 @@ export interface NativeTool {
   handler: (input: Record<string, unknown>) => Promise<string>;
 }
 
+/** Engine-injected stdio MCP server. Never sourced from workflow YAML. */
+export interface ManagedMcpServerConfig {
+  command: string;
+  args: readonly string[];
+  env: Record<string, string>;
+}
+
 /**
  * Raw node configuration from workflow YAML.
  * Providers translate fields they understand; unknown fields are ignored.
@@ -547,6 +614,8 @@ export interface NodeConfig {
   /** Node ID from the workflow DAG — used by providers for per-node isolation (e.g., session dirs). */
   nodeId?: string;
   mcp?: string;
+  /** Runtime-only operator-managed MCP servers, injected after attestation. */
+  managedMcpServers?: Record<string, ManagedMcpServerConfig>;
   hooks?: unknown;
   skills?: string[];
   /**
@@ -589,8 +658,7 @@ export interface NodeConfig {
    * across the @archon/providers/types contract boundary.
    */
   pi?: Pick<PiProviderDefaults, 'enableExtensions' | 'interactive' | 'extensionFlags'>;
-  effort?: string;
-  thinking?: unknown;
+  effort?: EffortRung;
   sandbox?: unknown;
   betas?: string[];
   output_format?: Record<string, unknown>;
@@ -621,7 +689,32 @@ export interface NodeConfig {
  * The orchestrator path uses base AgentRequestOptions fields only.
  * The workflow path additionally passes nodeConfig and assistantConfig.
  */
+export interface ProviderLaunchAttestationV1 {
+  version: 1;
+  provider: 'codex' | 'claude';
+  nodeId: string;
+  model?: string;
+  credential: {
+    vendor: string;
+    kind: 'subscription';
+    delivery: 'environment' | 'managed_file';
+  };
+  neutralizedAliases: readonly string[];
+  deliveredAliases: readonly string[];
+  managedPathIdentity?: string;
+  envPolicy: 'targeted_empty_overrides';
+  filesystemSettingsPolicy?: 'disabled';
+  executableIdentity: { status: 'deferred_to_provider' };
+  billingClaim: 'unverified';
+}
+
 export interface SendQueryOptions extends AgentRequestOptions {
+  /**
+   * Non-secret, run-local evidence of the credential isolation applied by the
+   * workflow engine immediately before this provider call. Providers may use it
+   * for local diagnostics; it is not provider-side billing proof.
+   */
+  providerLaunchAttestation?: ProviderLaunchAttestationV1;
   /** Raw YAML node config — provider translates internally to SDK-specific options. */
   nodeConfig?: NodeConfig;
   /** Per-provider defaults from .archon/config.yaml assistants section. */
@@ -686,7 +779,6 @@ export interface ProviderCapabilities {
   envInjection: boolean;
   costControl: boolean;
   effortControl: boolean;
-  thinkingControl: boolean;
   fallbackModel: boolean;
   sandbox: boolean;
   /**
@@ -796,6 +888,8 @@ export interface ProviderInfo {
   displayName: string;
   capabilities: ProviderCapabilities;
   builtIn: boolean;
+  /** The shared ladder when this provider accepts `effort:`; absent otherwise. */
+  effortLevels?: readonly EffortRung[];
 }
 
 /**

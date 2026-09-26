@@ -18,6 +18,7 @@ import type {
   LoopGateRunMetadata,
   RunAttention,
 } from '@archon/workflows/schemas/workflow-run';
+import type { DashboardWorkflowRun } from '../schemas/workflow-run';
 import * as workflowDb from '../db/workflows';
 import * as workflowNodeSessionDb from '../db/workflow-node-sessions';
 
@@ -33,7 +34,7 @@ function getLog(): ReturnType<typeof createLogger> {
 // ---------------------------------------------------------------------------
 
 export interface WorkflowStatusData {
-  runs: WorkflowRun[];
+  runs: DashboardWorkflowRun[];
 }
 
 export interface ApprovalOperationResult {
@@ -295,6 +296,11 @@ export function assertApprovable(run: WorkflowRun): ApprovalContext {
           `('workflow:' node '${attention.nodeId}'). Approve or reject the child run instead` +
           `: /workflow approve ${attention.childRunId}`
       );
+    case 'action_required':
+      throw new Error(
+        `Run ${run.id} is paused for an outside action. Complete it, then resume the run; ` +
+          'abandon it if it should not continue.'
+      );
     case 'unreadable':
       throw new Error(unreadableGateMessage(run, attention, approval));
     case 'terminal':
@@ -341,6 +347,11 @@ export function assertRejectable(run: WorkflowRun): ApprovalContext | undefined 
     : undefined;
   const attention = runAttention(run);
   switch (attention?.kind) {
+    case 'action_required':
+      throw new Error(
+        `Run ${run.id} is paused for an outside action. Complete it, then resume the run; ` +
+          'abandon it if it should not continue.'
+      );
     case 'blocked_on_child':
       // Same redirect as assertApprovable: the parent's pause is not a rejectable
       // gate — cancelling the parent here would silently orphan the still-paused
@@ -377,13 +388,14 @@ export function assertRejectable(run: WorkflowRun): ApprovalContext | undefined 
 // Operations
 // ---------------------------------------------------------------------------
 
-/**
- * List all running and paused workflow runs.
- */
-export async function getWorkflowStatus(): Promise<WorkflowStatusData> {
-  const runs = await workflowDb.listWorkflowRuns({
+/** List running and paused workflow runs, optionally scoped to one codebase. */
+export async function getWorkflowStatus(options?: {
+  codebaseId?: string;
+}): Promise<WorkflowStatusData> {
+  const { runs } = await workflowDb.listDashboardRuns({
     status: ['running', 'paused'],
     limit: 50,
+    ...(options?.codebaseId ? { codebaseId: options.codebaseId } : {}),
   });
   return { runs };
 }

@@ -55,6 +55,8 @@ Settings are loaded in this order (later overrides earlier):
 
 The last three layers exist only where their setting has a run-time consumer. Archon-managed GitHub and provider credentials remain protected and are injected after user-authored run environment values.
 
+`managedResources.codegraph_managed_v1` is an exception to ordinary layering: it is an operator-owned, global-only registry in `~/.archon/config.yaml`. Repository and run config cannot replace its command paths, digests, pin, protocol, or privacy environment. A run may select only the governed `off | optional | required` mode.
+
 ## Global Configuration
 
 Create `~/.archon/config.yaml` for user-wide preferences:
@@ -117,9 +119,15 @@ tiers:
 
 # Model aliases — optional custom refs for project workflows.
 aliases:
-  '@reasoning': { provider: claude, model: opus, thinking: { type: enabled, budgetTokens: 8000 } }
+  '@reasoning': { provider: claude, model: opus, effort: max }
 
 ```
+
+### Managed CodeGraph registry
+
+An operator installer may add `managedResources.codegraph_managed_v1` to the global config. Archon treats that entry as read-only and validates its schema version, adapter protocol, executable and dependency-bundle digests, OpenConfig version pin, runtime bundle, and exact privacy environment. Do not copy this entry into a repository or hand-author arbitrary commands: the owner tool is responsible for atomic install and rotation. `archon doctor --json` probes the registry without invoking the adapter or starting CodeGraph.
+
+At run time Archon gives the governed adapter only the exact created or adopted worktree. A successful strict-freshness attestation permits Archon to expose `codegraph serve --mcp -p <exact-worktree>` to MCP-capable host providers. Pi and OpenCode do not receive it. Container execution cannot reach the host stdio server. Therefore `required` fails before the first provider call for any incompatible node or container run; `optional` continues without CodeGraph and reports the fallback.
 
 The `tiers:` block above is no longer hand-edit-only -- you can also set the `small`/`medium`/`large` presets from the console **AI Settings** -> **Model Tiers** panel, or from the CLI with [`archon ai tier set`](/reference/cli/#ai). Connecting your own provider API key or subscription is covered in [Per-user credentials and AI Settings](/getting-started/ai-assistants/#per-user-credentials-and-ai-settings).
 
@@ -137,6 +145,9 @@ workflows:
   quotaMaxAttempts: 3
 env:
   BENCH_MODE: "1"
+managedResources:
+  codegraph:
+    mode: optional
 ```
 
 ```bash
@@ -147,7 +158,7 @@ archon workflow run x \
 
 The file changes only the keys it contains. The explicit model flag is the final layer, so the command above replaces the file's `large` binding and keeps the file or lower-layer `small`, `medium`, aliases, assistant defaults, and other settings.
 
-Run config accepts settings whose consumers still execute after the run is dispatched: `assistant` or `defaultAssistant`, `assistants`, `tiers`, `aliases`, `workflows`, `docs.path`, and `env`. It fails before source capture, isolation, or execution when a key cannot truthfully apply at that point:
+Run config accepts settings whose consumers still execute after the run is dispatched: `assistant` or `defaultAssistant`, `assistants`, `tiers`, `aliases`, `workflows`, `docs.path`, `env`, and `managedResources.codegraph.mode`. The equivalent CLI flag is `--codegraph off|optional|required`; an explicit flag wins over the run-config value. It fails before source capture, isolation, or execution when a key cannot truthfully apply at that point:
 
 - `commands` and `defaults` already affected workflow and command discovery.
 - `worktree` and `container` already affected isolation.
@@ -271,6 +282,12 @@ Set in `~/.archon/config.yaml` (global) or `.archon/config.yaml` (repo-specific)
 ### Worktree file copying (`worktree.copyFiles`)
 
 `git worktree add` only copies **tracked** files into a new worktree. Anything gitignored — secrets, local planning docs, agent reports, IDE settings, data fixtures — is absent by default. Archon's `worktree.copyFiles` closes that gap: after the worktree is created, each listed path is copied from the canonical repo into the worktree via raw filesystem copy (not git), so gitignored content comes along for the ride.
+
+**Why this matters for agent runs.** A run does its work inside the worktree, so anything the agent needs at runtime has to be there. `.env` is the common case: without it an agent cannot start the project's server, run an integration test, or reproduce a bug that reads local credentials — and nothing errors, it simply finds no configuration. If you want agents to verify their own work by running the thing they changed, list `.env` here.
+
+Copy the **real** gitignored file, never a tracked template. Listing `.env.example` is wrong twice over: the worktree already has it, because it is tracked; and materialising it as `.env` produces placeholder credentials, so a server starts misconfigured instead of failing loudly.
+
+`worktree.copyFiles` is read from the repo's own `.archon/config.yaml`. It is not a global setting — placing it in `~/.archon/config.yaml` parses without error and has no effect.
 
 **Nothing is copied unless you list it.** Archon used to copy `.archon/` into every worktree automatically, because that was the only way a workflow's own commands and scripts could be found from inside the worktree it was running against. Runs now carry their own source (see below), so the implicit copy is gone.
 

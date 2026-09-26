@@ -10,7 +10,7 @@
  * - Conversation-scoped subscriptions via registerRun() mapping
  */
 import { EventEmitter } from 'events';
-import type { ArtifactType } from './schemas';
+import type { ArtifactType, EffortLevel, NodeSkipReason, SkipCause } from './schemas';
 import { createLogger } from '@archon/paths';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
@@ -29,6 +29,7 @@ interface WorkflowStartedEvent {
   runId: string;
   workflowName: string;
   conversationId: string;
+  transcriptPath: string;
 }
 
 interface WorkflowCompletedEvent {
@@ -87,7 +88,7 @@ interface NodeStartedEvent {
   provider?: string; // resolved AI provider (absent for bash/script nodes)
   model?: string; // resolved model string (absent for bash/script nodes)
   tier?: 'small' | 'medium' | 'large'; // only set when node.model was a tier keyword
-  effort?: string; // resolved AI effort (absent when unset or unsupported)
+  effort?: EffortLevel; // resolved AI effort (absent when unset or unsupported)
 }
 
 interface NodeCompletedEvent {
@@ -109,13 +110,21 @@ interface NodeFailedEvent {
   error: string;
 }
 
-interface NodeSkippedEvent {
+interface NodeSkippedEventBase {
   type: 'node_skipped';
   runId: string;
   nodeId: string;
   nodeName: string;
-  reason: 'when_condition' | 'when_condition_parse_error' | 'trigger_rule' | 'prior_success';
 }
+
+type NodeSkippedEvent = NodeSkippedEventBase &
+  (
+    | { reason: 'prior_success' }
+    | {
+        reason: Exclude<NodeSkipReason, 'prior_success'>;
+        cause: SkipCause;
+      }
+  );
 
 interface ToolStartedEvent {
   type: 'tool_started';

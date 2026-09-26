@@ -58,6 +58,23 @@ export interface OpenAiOAuthCredentials {
   [key: string]: unknown;
 }
 
+/** Runtime guard for the exact fields Codex consumes from managed auth.json. */
+export function hasCompleteOpenAiOAuthCredentials(
+  creds: OAuthCredentials
+): creds is OpenAiOAuthCredentials {
+  return (
+    typeof creds.access === 'string' &&
+    creds.access.length > 0 &&
+    typeof creds.refresh === 'string' &&
+    creds.refresh.length > 0 &&
+    Number.isFinite(creds.expires) &&
+    typeof creds.accountId === 'string' &&
+    creds.accountId.length > 0 &&
+    typeof creds.id_token === 'string' &&
+    creds.id_token.length > 0
+  );
+}
+
 /** An authorize URL plus the per-attempt secrets needed to finish the flow. */
 export interface OpenAiAuthorizeFlow {
   url: string;
@@ -327,7 +344,6 @@ export async function mintOpenAiOAuthApiKey(
   if (typeof creds.expires === 'number' && Date.now() >= creds.expires) {
     current = await refreshOpenAiOAuthCredentials(creds);
   }
-  const access = typeof current.access === 'string' ? current.access : '';
-  if (!access) return null;
-  return { newCredentials: current, apiKey: access };
+  if (!hasCompleteOpenAiOAuthCredentials(current)) return null;
+  return { newCredentials: current, apiKey: current.access };
 }

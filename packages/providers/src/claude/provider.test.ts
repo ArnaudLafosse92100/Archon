@@ -26,6 +26,7 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
 import { ClaudeProvider, classifySubprocessError, shouldPassNoEnvFile } from './provider';
 import * as claudeModule from './provider';
 import * as binaryResolver from './binary-resolver';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '../types';
 
 describe('shouldPassNoEnvFile', () => {
   test('returns false when cliPath is undefined (dev mode — SDK 0.2.x resolves a native binary)', () => {
@@ -137,7 +138,6 @@ describe('ClaudeProvider', () => {
         envInjection: true,
         costControl: true,
         effortControl: true,
-        thinkingControl: true,
         fallbackModel: true,
         sandbox: true,
         settingSources: true,
@@ -1640,6 +1640,109 @@ describe('ClaudeProvider', () => {
       expect(callArgs.options.settingSources).toEqual([]);
     });
 
+    test('strict subscription launch disables project and user setting sources at provider boundary', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'test-session' };
+      });
+
+      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+        nodeConfig: { settingSources: ['project'] },
+        assistantConfig: { settingSources: ['project', 'user'] },
+        env: {
+          ...Object.fromEntries(STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS.map(key => [key, ''])),
+          CLAUDE_CODE_OAUTH_TOKEN: 'strict-oauth-token',
+          ANTHROPIC_OAUTH_TOKEN: 'strict-oauth-token',
+          CLAUDE_CONFIG_DIR: '/tmp/strict-claude-config',
+        },
+        providerLaunchAttestation: {
+          version: 1,
+          provider: 'claude',
+          nodeId: 'strict-reviewer',
+          credential: {
+            vendor: 'anthropic',
+            kind: 'subscription',
+            delivery: 'environment',
+          },
+          neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
+          deliveredAliases: [
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            'ANTHROPIC_OAUTH_TOKEN',
+            'CLAUDE_CONFIG_DIR',
+          ],
+          managedPathIdentity: 'claude-config',
+          envPolicy: 'targeted_empty_overrides',
+          filesystemSettingsPolicy: 'disabled',
+          executableIdentity: { status: 'deferred_to_provider' },
+          billingClaim: 'unverified',
+        },
+      })) {
+        // consume
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      expect(callArgs.options.settingSources).toEqual([]);
+    });
+
+    test('strict subscription launch fails closed on ambient auth and backend routes', async () => {
+      const forbiddenRoutes = [
+        'ANTHROPIC_AUTH_TOKEN',
+        'ANTHROPIC_BASE_URL',
+        'CLAUDE_CODE_USE_BEDROCK',
+        'CLAUDE_CODE_USE_VERTEX',
+        'CLAUDE_CODE_USE_FOUNDRY',
+      ] as const;
+
+      for (const forbiddenRoute of forbiddenRoutes) {
+        const original = process.env[forbiddenRoute];
+        process.env[forbiddenRoute] = 'ambient-route-must-not-win';
+        const env = Object.fromEntries(STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS.map(key => [key, '']));
+        delete env[forbiddenRoute];
+        try {
+          const consume = async (): Promise<void> => {
+            for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+              env: {
+                ...env,
+                CLAUDE_CODE_OAUTH_TOKEN: 'strict-oauth-token',
+                ANTHROPIC_OAUTH_TOKEN: 'strict-oauth-token',
+                CLAUDE_CONFIG_DIR: '/tmp/strict-claude-config',
+              },
+              providerLaunchAttestation: {
+                version: 1,
+                provider: 'claude',
+                nodeId: 'strict-reviewer',
+                credential: {
+                  vendor: 'anthropic',
+                  kind: 'subscription',
+                  delivery: 'environment',
+                },
+                neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
+                deliveredAliases: [
+                  'CLAUDE_CODE_OAUTH_TOKEN',
+                  'ANTHROPIC_OAUTH_TOKEN',
+                  'CLAUDE_CONFIG_DIR',
+                ],
+                managedPathIdentity: 'claude-config',
+                envPolicy: 'targeted_empty_overrides',
+                filesystemSettingsPolicy: 'disabled',
+                executableIdentity: { status: 'deferred_to_provider' },
+                billingClaim: 'unverified',
+              },
+            })) {
+              // consume
+            }
+          };
+          await expect(consume()).rejects.toThrow(
+            `strict_claude_launch_invalid:forbidden_route:${forbiddenRoute}`
+          );
+          expect(mockQuery).not.toHaveBeenCalled();
+        } finally {
+          if (original === undefined) delete process.env[forbiddenRoute];
+          else process.env[forbiddenRoute] = original;
+        }
+      }
+    });
+
     test('passes env from requestOptions into SDK options', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
@@ -1887,6 +1990,7 @@ describe('ClaudeProvider', () => {
         ['minimal', 'low'],
         ['max', 'max'],
         ['ultra', 'max'],
+        ['persistent', 'max'],
       ] as const) {
         mockQuery.mockClear();
         mockQuery.mockImplementation(async function* () {
@@ -1902,37 +2006,6 @@ describe('ClaudeProvider', () => {
         const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
         expect(callArgs.options.effort).toBe(applied);
       }
-    });
-
-    test('omits effort from SDK for a value that is not a rung', async () => {
-      mockQuery.mockImplementation(async function* () {
-        yield { type: 'result', session_id: 'sid' };
-      });
-
-      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
-        nodeConfig: { effort: 'off' },
-      })) {
-        // consume
-      }
-
-      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
-      expect(callArgs.options).not.toHaveProperty('effort');
-    });
-
-    test('passes thinking object to SDK via nodeConfig', async () => {
-      mockQuery.mockImplementation(async function* () {
-        yield { type: 'result', session_id: 'sid' };
-      });
-
-      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
-        nodeConfig: { thinking: { type: 'enabled', budgetTokens: 8000 } },
-      })) {
-        // consume
-      }
-
-      expect(mockQuery).toHaveBeenCalledTimes(1);
-      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
-      expect(callArgs.options.thinking).toEqual({ type: 'enabled', budgetTokens: 8000 });
     });
 
     test('passes maxBudgetUsd to SDK', async () => {
@@ -2895,6 +2968,37 @@ describe('sendQuery decomposition behaviors', () => {
       expect(options.strictMcpConfig).toBe(true);
       expect(Object.keys(options.mcpServers as Record<string, unknown>)).toEqual(['declared']);
       expect(options.allowedTools).toContain('mcp__declared__*');
+    });
+
+    test('translates an engine-managed MCP server into strict Claude SDK options', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+
+      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
+        nodeConfig: {
+          nodeId: 'managed-mcp-node',
+          managedMcpServers: {
+            codegraph: {
+              command: '/managed/codegraph',
+              args: ['serve', '--mcp', '-p', workflowCwd],
+              env: { CODEGRAPH_TELEMETRY: '0' },
+            },
+          },
+        },
+      })) {
+        // consume
+      }
+
+      const options = (mockQuery.mock.calls[0][0] as { options: Record<string, unknown> }).options;
+      expect(options.mcpServers).toEqual({
+        codegraph: {
+          command: '/managed/codegraph',
+          args: ['serve', '--mcp', '-p', workflowCwd],
+          env: { CODEGRAPH_TELEMETRY: '0' },
+        },
+      });
+      expect(options.allowedTools).toContain('mcp__codegraph__*');
     });
 
     test('keeps partial non-workflow nodeConfig on ambient defaults', async () => {

@@ -28,6 +28,7 @@
  *   the SDK switched to native binaries in the 0.2.x series. See
  *   `shouldPassNoEnvFile` for the implications on the `--no-env-file` flag.
  */
+import { isAbsolute } from 'node:path';
 import {
   query,
   type Options,
@@ -45,6 +46,7 @@ import type {
   ProviderCapabilities,
   NodeConfig,
 } from '../types';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '../types';
 import { parseClaudeConfig } from './config';
 import { CLAUDE_CAPABILITIES } from './capabilities';
 import { buildContainerSpawn } from './container-spawn';
@@ -53,7 +55,7 @@ import { buildArchonMcpServer, ARCHON_TOOL_SERVER } from './native-tools';
 import { createLogger } from '@archon/paths';
 import { loadMcpConfig } from '../mcp/config';
 import { withResumedOutcome, resumedOutcome } from '../shared/resumed';
-import { clampEffort, type AssertNever } from '../shared/effort';
+import { clampEffort, type AssertNever } from '@archon/paths/effort';
 import {
   claudeSkillSearchRoots,
   findInstalledSkillNames,
@@ -83,6 +85,69 @@ const CLAUDE_EFFORTS = [
 export type ClaudeEffortsAreComplete = AssertNever<
   Exclude<NonNullable<Options['effort']>, (typeof CLAUDE_EFFORTS)[number]>
 >;
+
+const STRICT_CLAUDE_DELIVERED_ALIASES = [
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_OAUTH_TOKEN',
+  'CLAUDE_CONFIG_DIR',
+] as const;
+
+function sameStringSet(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && expected.every(value => actual.includes(value));
+}
+
+/** Fail closed before the SDK sees a strict Claude launch. */
+export function assertStrictClaudeLaunchEnvironment(
+  requestOptions: SendQueryOptions | undefined,
+  mergedEnv: NodeJS.ProcessEnv,
+  settingSources: readonly ('project' | 'user')[]
+): void {
+  const attestation = requestOptions?.providerLaunchAttestation;
+  if (attestation?.provider !== 'claude') return;
+
+  const fail = (reason: string): never => {
+    throw new Error(`strict_claude_launch_invalid:${reason}`);
+  };
+  if (
+    attestation.envPolicy !== 'targeted_empty_overrides' ||
+    attestation.filesystemSettingsPolicy !== 'disabled'
+  ) {
+    fail('policy');
+  }
+  if (!sameStringSet(attestation.neutralizedAliases, STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS)) {
+    fail('neutralized_aliases');
+  }
+  if (!sameStringSet(attestation.deliveredAliases, STRICT_CLAUDE_DELIVERED_ALIASES)) {
+    fail('delivered_aliases');
+  }
+  for (const key of STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS) {
+    if (mergedEnv[key]) fail(`forbidden_route:${key}`);
+  }
+
+  const deliveredEnv = requestOptions?.env;
+  const claudeOauth = deliveredEnv?.CLAUDE_CODE_OAUTH_TOKEN;
+  const anthropicOauth = deliveredEnv?.ANTHROPIC_OAUTH_TOKEN;
+  if (
+    typeof claudeOauth !== 'string' ||
+    claudeOauth.length === 0 ||
+    anthropicOauth !== claudeOauth ||
+    mergedEnv.CLAUDE_CODE_OAUTH_TOKEN !== claudeOauth ||
+    mergedEnv.ANTHROPIC_OAUTH_TOKEN !== claudeOauth
+  ) {
+    fail('oauth_delivery');
+  }
+
+  const configDir = deliveredEnv?.CLAUDE_CONFIG_DIR;
+  if (
+    typeof configDir !== 'string' ||
+    !isAbsolute(configDir) ||
+    mergedEnv.CLAUDE_CONFIG_DIR !== configDir ||
+    attestation.managedPathIdentity !== 'claude-config'
+  ) {
+    fail('config_dir');
+  }
+  if (settingSources.length !== 0) fail('setting_sources');
+}
 
 /**
  * Content block type for assistant messages
@@ -635,6 +700,22 @@ async function applyNodeConfig(
     }
   }
 
+  if (nodeConfig.managedMcpServers && Object.keys(nodeConfig.managedMcpServers).length > 0) {
+    const existing = (options.mcpServers ?? {}) as Record<string, unknown>;
+    const collision = Object.keys(nodeConfig.managedMcpServers).find(name => name in existing);
+    if (collision) {
+      throw new Error(`Managed MCP server '${collision}' conflicts with node MCP configuration.`);
+    }
+    options.mcpServers = {
+      ...existing,
+      ...nodeConfig.managedMcpServers,
+    } as Options['mcpServers'];
+    options.allowedTools = [
+      ...(options.allowedTools ?? []),
+      ...Object.keys(nodeConfig.managedMcpServers).map(name => `mcp__${name}__*`),
+    ];
+  }
+
   // Native skill selection. The SDK requires Skill to remain allowed when an
   // explicit tool list is present; without a list, its normal tool set applies.
   if (selectsSkills) {
@@ -655,9 +736,9 @@ async function applyNodeConfig(
     getLog().info({ agentIds: Object.keys(nodeConfig.agents) }, 'claude.inline_agents_registered');
   }
 
-  // effort — clamped into the SDK's own vocabulary. Claude has no `minimal` or
-  // `ultra` rung, so they become its shallowest (`low`) and deepest (`max`)
-  // values respectively.
+  // effort — clamped into the SDK's own vocabulary. Claude has no `minimal`,
+  // `ultra`, or `persistent` rung, so they become its shallowest (`low`) and
+  // deepest (`max`) values respectively.
   if (nodeConfig.effort !== undefined) {
     const effort = clampEffort(nodeConfig.effort, CLAUDE_EFFORTS);
     if (effort === undefined) {
@@ -668,11 +749,6 @@ async function applyNodeConfig(
       }
       options.effort = effort;
     }
-  }
-
-  // thinking
-  if (nodeConfig.thinking !== undefined) {
-    options.thinking = nodeConfig.thinking as Options['thinking'];
   }
 
   // sandbox
@@ -1048,7 +1124,7 @@ async function* streamClaudeMessages(
           yield { type: 'system', content: `MCP server connection failed: ${names}` };
         }
       } else if (subtype === 'task_started' && sysMsg.task_id) {
-        // Ambient / housekeeping tasks (SDK v0.3.247 signals them directly;
+        // Ambient / housekeeping tasks (SDK v0.3.247+ signals them directly;
         // older emitters use skip_transcript) are SDK-internal — they bloat
         // the Web UI's tasks panel without telling
         // the user anything actionable. Drop them at the provider boundary;
@@ -1421,10 +1497,9 @@ export class ClaudeProvider implements IAgentProvider {
    * Send a query to Claude and stream responses.
    * Orchestrates option building, nodeConfig translation, streaming, and retry.
    */
-  // TODO(#1135): Pre-spawn env-leak gate was removed during provider extraction.
-  // Caller-side enforcement (orchestrator, dag-executor) is tracked in #1135.
-  // Providers must NOT implement security gates — the platform guarantees safety
-  // before a provider runs.
+  // The workflow layer prepares strict subscription launches; the provider
+  // revalidates their effective environment at the last boundary before the SDK
+  // can spawn Claude Code. Non-attested calls retain the native provider path.
   async *sendQuery(
     prompt: string,
     cwd: string,
@@ -1452,10 +1527,18 @@ export class ClaudeProvider implements IAgentProvider {
     // process.env never crosses the boundary (the isolation invariant); the host
     // path inherits the (already-cleaned) process env exactly as before.
     const env = buildRequestSubprocessEnv(requestOptions);
-    const settingSources =
-      requestOptions?.nodeConfig?.settingSources ??
-      assistantDefaults.settingSources ??
-      (['project', 'user'] as const);
+    const isStrictSubscriptionLaunch =
+      requestOptions?.providerLaunchAttestation?.provider === 'claude';
+    // Filesystem settings can inject env after the SDK receives its subprocess
+    // env. A strict subscription launch must therefore disable every project
+    // and user setting source at this final provider boundary, regardless of
+    // node or assistant defaults. Runs without an attestation are unchanged.
+    const settingSources: readonly ('project' | 'user')[] = isStrictSubscriptionLaunch
+      ? []
+      : (requestOptions?.nodeConfig?.settingSources ??
+        assistantDefaults.settingSources ??
+        (['project', 'user'] as const));
+    assertStrictClaudeLaunchEnvironment(requestOptions, env, settingSources);
 
     // Apply nodeConfig translation once (deterministic, not retry-dependent)
     // We need a throwaway Options to extract warnings from applyNodeConfig,

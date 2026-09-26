@@ -3193,6 +3193,52 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    DagNodeSseEvent: {
+      /** @enum {string} */
+      type: 'dag_node';
+      runId: string;
+      nodeId: string;
+      name: string;
+      /** @enum {string} */
+      status: 'running' | 'completed' | 'failed' | 'skipped';
+      duration?: number;
+      error?: string;
+      reason?: components['schemas']['NodeSkipReason'];
+      cause?: components['schemas']['SkipCause'];
+      timestamp: number;
+    };
+    /** @enum {string} */
+    NodeSkipReason:
+      | 'prior_success'
+      | 'when_condition'
+      | 'when_condition_parse_error'
+      | 'trigger_rule'
+      | 'timeout';
+    SkipCause:
+      | {
+          /** @enum {string} */
+          kind: 'condition';
+          expr: string;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'condition_parse_error';
+          expr: string;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'timeout';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'upstream_failed';
+          origin: string;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'upstream_skipped';
+          origin: string;
+        };
     AuthStatusResponse: {
       enabled: boolean;
       /** @enum {string} */
@@ -3308,8 +3354,8 @@ export interface components {
     TierEntry: {
       provider: string;
       model: string;
-      effort?: string;
-      thinking?: unknown;
+      /** @enum {string} */
+      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'persistent';
     };
     UpdateUserTiersBody: {
       tiers: {
@@ -3433,26 +3479,20 @@ export interface components {
       provider?: string;
       model?: string;
       /** @enum {string} */
-      modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+      modelReasoningEffort?:
+        | 'minimal'
+        | 'low'
+        | 'medium'
+        | 'high'
+        | 'xhigh'
+        | 'max'
+        | 'ultra'
+        | 'persistent';
       /** @enum {string} */
       webSearchMode?: 'disabled' | 'cached' | 'live';
       interactive?: boolean;
       /** @enum {string} */
-      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
-      thinking?:
-        | {
-            /** @enum {string} */
-            type: 'adaptive';
-          }
-        | {
-            /** @enum {string} */
-            type: 'enabled';
-            budgetTokens?: number;
-          }
-        | {
-            /** @enum {string} */
-            type: 'disabled';
-          };
+      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'persistent';
       fallbackModel?: string;
       betas?: string[];
       sandbox?: {
@@ -3711,21 +3751,7 @@ export interface components {
         };
       };
       /** @enum {string} */
-      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
-      thinking?:
-        | {
-            /** @enum {string} */
-            type: 'adaptive';
-          }
-        | {
-            /** @enum {string} */
-            type: 'enabled';
-            budgetTokens?: number;
-          }
-        | {
-            /** @enum {string} */
-            type: 'disabled';
-          };
+      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'persistent';
       maxBudgetUsd?: number;
       systemPrompt?: string;
       fallbackModel?: string;
@@ -3769,6 +3795,9 @@ export interface components {
       command?: string;
       prompt?: string;
       bash?: string;
+      timeout?: number;
+      /** @enum {string} */
+      on_timeout?: 'skip';
       loop?: {
         until?: string;
         max_iterations: number;
@@ -3815,6 +3844,9 @@ export interface components {
         | {
             event: string;
             deadline_ms: number;
+          }
+        | {
+            attention: string;
           };
       cancel?: string;
       include?: string;
@@ -3833,12 +3865,11 @@ export interface components {
          */
         join: 'all_success' | 'all_done' | 'first_success';
       };
-      with?: unknown;
       script?: string;
       /** @enum {string} */
       runtime?: 'bun' | 'uv';
       deps?: string[];
-      timeout?: number;
+      with?: unknown;
     };
     /** @enum {string} */
     WorkflowSource: 'project' | 'bundled' | 'global';
@@ -3872,9 +3903,7 @@ export interface components {
       /** @enum {string|null} */
       outcome: 'succeeded' | 'failed' | null;
       user_message: string;
-      metadata: {
-        [key: string]: unknown;
-      };
+      metadata: components['schemas']['WorkflowRunMetadata'];
       started_at: string;
       completed_at: string | null;
       last_activity_at: string | null;
@@ -3887,6 +3916,7 @@ export interface components {
       platform_type: string | null;
       worker_platform_id: string | null;
       parent_platform_id: string | null;
+      active_nodes: string[];
       current_step_name: string | null;
       total_steps: number | null;
       /** @enum {string|null} */
@@ -3895,6 +3925,96 @@ export interface components {
       agents_failed: number | null;
       agents_total: number | null;
     };
+    WorkflowRunMetadata: {
+      wait?: components['schemas']['WorkflowWaitContext'];
+    } & {
+      [key: string]: unknown;
+    };
+    WorkflowWaitContext:
+      | {
+          /** @enum {string} */
+          owner: 'node';
+          nodeId: string;
+          /** @enum {string} */
+          kind: 'time';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'node';
+          nodeId: string;
+          /** @enum {string} */
+          kind: 'event';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+          event: string;
+          /** Format: date-time */
+          signaledAt?: string;
+          payload?: unknown;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'node';
+          nodeId: string;
+          /** @enum {string} */
+          kind: 'attention';
+          /** Format: date-time */
+          waitingSince: string;
+          message: string;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'loop_group';
+          nodeId: string;
+          bodyWaitId: string;
+          iteration: number;
+          sessionId: string | null;
+          sessionProvider: string | null;
+          /** @enum {string} */
+          kind: 'time';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'loop_group';
+          nodeId: string;
+          bodyWaitId: string;
+          iteration: number;
+          sessionId: string | null;
+          sessionProvider: string | null;
+          /** @enum {string} */
+          kind: 'event';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+          event: string;
+          /** Format: date-time */
+          signaledAt?: string;
+          payload?: unknown;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'loop_group';
+          nodeId: string;
+          bodyWaitId: string;
+          iteration: number;
+          sessionId: string | null;
+          sessionProvider: string | null;
+          /** @enum {string} */
+          kind: 'attention';
+          /** Format: date-time */
+          waitingSince: string;
+          message: string;
+        };
     CancelWorkflowRunResponse: {
       success: boolean;
       message: string;
@@ -3930,9 +4050,7 @@ export interface components {
       status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
       outcome: components['schemas']['WorkflowRunOutcome'];
       user_message: string;
-      metadata: {
-        [key: string]: unknown;
-      };
+      metadata: components['schemas']['WorkflowRunMetadata'];
       started_at: string;
       completed_at: string | null;
       last_activity_at: string | null;
@@ -4072,6 +4190,16 @@ export interface components {
       displayName: string;
       capabilities: components['schemas']['ProviderCapabilities'];
       builtIn: boolean;
+      effortLevels?: (
+        | 'minimal'
+        | 'low'
+        | 'medium'
+        | 'high'
+        | 'xhigh'
+        | 'max'
+        | 'ultra'
+        | 'persistent'
+      )[];
     };
     ProviderCapabilities: {
       sessionResume: boolean;
@@ -4084,7 +4212,6 @@ export interface components {
       envInjection: boolean;
       costControl: boolean;
       effortControl: boolean;
-      thinkingControl: boolean;
       fallbackModel: boolean;
       sandbox: boolean;
     };

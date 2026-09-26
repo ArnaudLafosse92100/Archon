@@ -41,8 +41,11 @@ export {
   getProjectStoragePaths,
   getStoragePathsForRoot,
   isInsideArchonHome,
+  resolveRunStorageRoot,
   getRunArtifactsDirForKey,
   getRunArtifactsDirForRoot,
+  getRunLogPathForRoot,
+  getRunWorkflowSourceDirForRoot,
   slugifyFolderName,
   getFolderProjectRoot,
   getFolderProjectArtifactsPath,
@@ -53,7 +56,9 @@ export {
   ensureProjectStructure,
   createProjectSourceSymlink,
   findMarkdownFilesRecursive,
+  findCommandFiles,
   getWebDistDir,
+  getSourceWebDistDir,
 } from './archon-paths';
 export type { ProjectStorageKey, ProjectStoragePaths } from './archon-paths';
 
@@ -77,6 +82,7 @@ export {
   BUNDLED_IS_BINARY,
   BUNDLED_VERSION,
   BUNDLED_GIT_COMMIT,
+  BUNDLED_GIT_REVISION,
   BUNDLED_WEB_DIST_SHA256,
 } from './bundled-build';
 
@@ -112,6 +118,7 @@ export {
   isTelemetryDisabled,
   getTelemetryStatus,
   resetTelemetryId,
+  WORKFLOW_ERROR_CLASSES,
 } from './telemetry';
 export type {
   WorkflowInvokedProperties,

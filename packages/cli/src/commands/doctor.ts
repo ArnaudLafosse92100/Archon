@@ -52,9 +52,65 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 export interface CheckResult {
+  id?: string;
   label: string;
   status: 'pass' | 'fail' | 'skip';
   message: string;
+  details?: Record<string, unknown>;
+  configured?: boolean;
+  ready?: boolean;
+  schemaVersion?: number;
+  protocol?: string;
+  expectedVersion?: string;
+  contractSha256?: string;
+}
+
+/** Non-mutating managed-resource probe. It validates registry bytes but never runs the adapter. */
+export async function checkCodegraphManagedResource(): Promise<CheckResult> {
+  try {
+    const [{ loadGlobalConfig }, { inspectCodegraphManagedRegistry }] = await Promise.all([
+      import('@archon/core/config'),
+      import('@archon/workflows/managed-codegraph-registry'),
+    ]);
+    const global = await loadGlobalConfig(true);
+    const inspection = await inspectCodegraphManagedRegistry(
+      global.managedResources?.codegraph_managed_v1
+    );
+    if (!inspection.configured) {
+      return {
+        id: 'codegraph_managed_v1',
+        label: 'Managed CodeGraph',
+        status: 'skip',
+        message: 'not configured (default off)',
+        configured: false,
+        ready: false,
+        details: { configured: false, ready: false },
+      };
+    }
+    return {
+      id: 'codegraph_managed_v1',
+      label: 'Managed CodeGraph',
+      status: 'pass',
+      message: `registry ready (CodeGraph ${inspection.expectedVersion})`,
+      configured: true,
+      ready: true,
+      schemaVersion: inspection.schemaVersion,
+      protocol: inspection.protocol,
+      expectedVersion: inspection.expectedVersion,
+      contractSha256: inspection.contractSha256,
+      details: { ...inspection },
+    };
+  } catch (error) {
+    return {
+      id: 'codegraph_managed_v1',
+      label: 'Managed CodeGraph',
+      status: 'fail',
+      message: (error as Error).message,
+      configured: true,
+      ready: false,
+      details: { configured: true, ready: false },
+    };
+  }
 }
 
 export interface ClaudeBinaryDeps {
@@ -736,9 +792,10 @@ export async function doctorCommand(
   checks?: (() => Promise<CheckResult>)[],
   // `--full` opts the OpenCode runtime probe in even when OpenCode isn't the
   // configured assistant. Does not boot the runtime — only widens the gate.
-  full = false
+  full = false,
+  json = false
 ): Promise<number> {
-  console.log('archon doctor — verifying your setup\n');
+  if (!json) console.log('archon doctor — verifying your setup\n');
   getLog().info('doctor.run_started');
   const env = process.env;
 
@@ -755,6 +812,7 @@ export async function doctorCommand(
         checkConnectedProviders(env),
         checkWorkspaceWritable(),
         checkBundledDefaults(),
+        checkCodegraphManagedResource(),
         checkTelemetry(),
         checkSlack(env),
         checkTelegram(env),
@@ -764,16 +822,29 @@ export async function doctorCommand(
   const settled = await Promise.allSettled(promises);
 
   let failures = 0;
+  const results: CheckResult[] = [];
   for (const s of settled) {
     if (s.status === 'rejected') {
       failures++;
       const msg = s.reason instanceof Error ? s.reason.message : String(s.reason);
-      console.log(`✗ unknown: check threw: ${msg}`);
+      const result: CheckResult = {
+        label: 'unknown',
+        status: 'fail',
+        message: `check threw: ${msg}`,
+      };
+      results.push(result);
+      if (!json) console.log(renderResult(result));
       getLog().error({ reason: s.reason }, 'doctor.check_threw_unexpectedly');
       continue;
     }
     if (s.value.status === 'fail') failures++;
-    console.log(renderResult(s.value));
+    results.push(s.value);
+    if (!json) console.log(renderResult(s.value));
+  }
+
+  if (json) {
+    console.log(JSON.stringify({ ok: failures === 0, checks: results }));
+    return failures === 0 ? 0 : 1;
   }
 
   console.log('');

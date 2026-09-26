@@ -70,8 +70,7 @@ import {
   SUBRUN_METADATA_KEYS,
   CONTINUATION_METADATA_KEY,
 } from '@archon/workflows/schemas/workflow-run';
-import type { WorkflowDefinition, WorkflowSource } from '@archon/workflows/schemas/workflow';
-import type { DagNode } from '@archon/workflows/schemas/dag-node';
+import type { ResolvedWorkflow, WorkflowSource } from '@archon/workflows/schemas/workflow';
 import type { RunModelOverrides } from '@archon/workflows/model-validation';
 import type { WorkflowRunConfigInput } from '@archon/workflows/schemas/run-config';
 import { createWorkflowDeps } from '../workflows/store-adapter';
@@ -85,6 +84,7 @@ import { loadRepoConfig } from '../config/config-loader';
 import { isPerUserGitHubEnabled } from '../github-auth/config';
 import { getUserGithubNoreplyEmail } from '../db/user-github-token-store';
 import { toBranchName } from '@archon/git';
+import { startRunLiveOwner } from '../services/run-live-owner';
 
 type IsolationResolution =
   | { status: 'existing'; cwd: string; env: IsolationEnvironmentRow }
@@ -279,7 +279,7 @@ export interface WorkflowRoutingContext {
   readonly originalMessage: string;
   readonly conversationDbId: string;
   readonly codebaseId?: string;
-  readonly availableWorkflows: readonly WorkflowDefinition[];
+  readonly availableWorkflows: readonly ResolvedWorkflow[];
   /**
    * GitHub issue/PR context built from webhook events.
    * Contains formatted markdown with: issue title, author, labels, and body.
@@ -345,7 +345,7 @@ export interface WorkflowRoutingContext {
 async function dispatchBackgroundWorkflowOwned(
   owner: CapturedSourceOwner,
   ctx: WorkflowRoutingContext,
-  workflow: WorkflowDefinition,
+  workflow: ResolvedWorkflow,
   isolationContext?: {
     branchName?: string;
     isPrReview?: boolean;
@@ -365,9 +365,7 @@ async function dispatchBackgroundWorkflowOwned(
   // rule that fails open the moment a third appears. Throws before the worker conversation
   // exists, so a refusal leaves nothing behind.
   assertInteractiveClassNotBackgrounded(workflow);
-  // Already-expanded — discoverWorkflowsWithConfig's output never contains an
-  // IncludeDirective (#2486).
-  assertComposedGateDriveable(workflow.nodes as DagNode[]);
+  assertComposedGateDriveable(workflow.nodes);
 
   // 1. Generate worker conversation ID
   const workerPlatformId = `web-worker-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
@@ -557,7 +555,7 @@ async function dispatchBackgroundWorkflowOwned(
       }
       workflow = reResolved;
     }
-    await recordSelectedWorkflow(preparedSource.captureRoot, workflow.name);
+    await recordSelectedWorkflow(preparedSource.anchor.root, workflow.name);
   } catch (error) {
     const err = error as Error;
     // Reclaim before returning: this branch is the console's default dispatch path, and
@@ -571,7 +569,15 @@ async function dispatchBackgroundWorkflowOwned(
     return;
   }
 
-  // 7. Pre-create workflow run row so the UI can fetch it immediately.
+  // 7. Publish the owner before the row can become visible as active.
+  const runLiveOwner = await startRunLiveOwner(preparedSource.runId);
+  let runLiveOwnerClose: Promise<void> | undefined;
+  const closeRunLiveOwner = (): Promise<void> => {
+    runLiveOwnerClose ??= runLiveOwner.close();
+    return runLiveOwnerClose;
+  };
+
+  // Pre-create workflow run row so the UI can fetch it immediately.
   // Without this, navigating to the execution page before executeWorkflow's
   // async setup completes would 404 (row doesn't exist yet for 1-5 seconds).
   let preCreatedRun: Awaited<ReturnType<typeof workflowDeps.store.createWorkflowRun>> | undefined;
@@ -664,6 +670,7 @@ async function dispatchBackgroundWorkflowOwned(
             ...(ctx.runConfig ? { runConfig: ctx.runConfig } : {}),
           }
         );
+        await closeRunLiveOwner();
         // Surface workflow output to parent conversation as a result card
         if ('paused' in result) {
           // Paused workflows (approval gates) — no result card yet
@@ -729,6 +736,7 @@ async function dispatchBackgroundWorkflowOwned(
             ? 'background_workflow_terminal_write_failed'
             : 'background_workflow_failed'
         );
+        await closeRunLiveOwner();
         // Surface error to parent conversation — include workflowResult metadata when
         // we have a pre-created run ID so the chat renders a result card with "View full logs"
         const failureRunId = preCreatedRun?.id;
@@ -763,6 +771,8 @@ async function dispatchBackgroundWorkflowOwned(
       }
     } catch (outerError) {
       getLog().error({ err: toError(outerError) }, 'background_workflow_unhandled_error');
+    } finally {
+      await closeRunLiveOwner();
     }
   });
   owner.adopt();
@@ -778,7 +788,7 @@ async function dispatchBackgroundWorkflowOwned(
  */
 export async function dispatchBackgroundWorkflow(
   ctx: WorkflowRoutingContext,
-  workflow: WorkflowDefinition,
+  workflow: ResolvedWorkflow,
   isolationContext?: {
     branchName?: string;
     isPrReview?: boolean;

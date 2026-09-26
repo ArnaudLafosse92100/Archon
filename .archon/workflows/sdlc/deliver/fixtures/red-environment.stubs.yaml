@@ -12,7 +12,7 @@ impl__implement:
   green: true
   summary: "stub: implemented and green"
 impl__assert-changed: "3 files changed"
-pr__pr: { number: 7, url: "https://github.com/example/repo/pull/7", head: "fixture-branch", base: "dev", is_draft: true }
+pr__pr: { repo: { host: "github.com", path: "example/repo" }, number: 7, url: "https://github.com/example/repo/pull/7", head: "fixture-branch", base: "dev", is_draft: true }
 classify:
   errors: false
   docs: false
@@ -47,13 +47,19 @@ recheck__synthesize:
   action: none
   findings_summary: "stub: the correction closed the finding"
 sync-pr-body: "body resynced, and the environment red disclosed"
+validate__applicability: { fingerprint: fixture, scope: "", context: "", validator: fixture, generation: 1, reason: fixture, nonce: fixture, reuse: false }
 validate__validate:
+  green: true
+  summary: "stub: the contention cleared; full gate green"
+validate__selected-verdict:
   green: true
   summary: "stub: the contention cleared; full gate green"
 gate-validated: '{"gate":"green"}'
 ci-probe: '{"state":"concluded","detail":"all checks green"}'
+ci-verdict: '{"state":"concluded","detail":"all checks green"}'
 flip-ready: "https://github.com/example/repo/pull/7"
 outcome: "https://github.com/example/repo/pull/7"
+validate__record-evidence: '{"recorded":true}'
 fixture:
   expect: completed
   reached: [gate-correction-green, flip-ready]

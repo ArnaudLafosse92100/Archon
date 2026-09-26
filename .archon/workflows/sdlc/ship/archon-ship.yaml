@@ -23,6 +23,26 @@ inputs:
   errors:
     default: "auto"
     description: Silent-failure lens — auto, true, or false.
+  publish:
+    default: "false"
+    description: >-
+      "true" lets triage write its proposed label set to the resolved GitHub
+      issue. "false" stays advisory; other values are rejected. Forwarded
+      unchanged to triage.
+  state_labels:
+    default: "{}"
+    description: >-
+      Optional caller-owned JSON state-label mapping forwarded unchanged to
+      triage. Empty leaves triage state unlabeled.
+  validation_scope:
+    default: ""
+    description: >-
+      Optional package, directory, or named-check scope forwarded to delivery.
+      Empty keeps the project's full applicable gate.
+  validation_context:
+    default: ""
+    description: >-
+      Optional nonsecret external-state identity forwarded to delivery.
 
 returns: outcome
 
@@ -33,6 +53,8 @@ nodes:
     include: archon-triage
     with:
       target: "$INPUTS.target"
+      publish: "$INPUTS.publish"
+      state_labels: "$INPUTS.state_labels"
 
   - id: inv
     include: archon-investigate
@@ -40,10 +62,9 @@ nodes:
       target: >-
         Investigate the unresolved causal question recorded in
         $ARTIFACTS_DIR/triage.md. Read that assessment first; its confirmed facts
-        are context, while its unknowns are the investigation target. Original
-        work item: $INPUTS.target
+        are context, while its unknowns are the investigation target.
     depends_on: [triage]
-    when: "$triage.output.route == 'investigate'"
+    when: "$triage.output.contract == 'READY' && $triage.output.route == 'investigate'"
 
   # These three route markers form one join into delivery. Expected negative
   # judgments skip their marker; contract failures inside the advisory package
@@ -52,7 +73,7 @@ nodes:
   - id: gate-direct
     bash: echo '{"gate":"direct"}'
     depends_on: [triage]
-    when: "$triage.output.route == 'deliver'"
+    when: "$triage.output.contract == 'READY' && $triage.output.route == 'deliver'"
 
   - id: gate-rooted
     bash: echo '{"gate":"rooted"}'
@@ -65,10 +86,9 @@ nodes:
       work: >-
         Plan the current work item from $ARTIFACTS_DIR/triage.md. Read that
         assessment first, preserve its verified outcome and constraints, and
-        decide the implementation questions it identified. Original work item:
-        $INPUTS.target
+        decide the implementation questions it identified.
     depends_on: [triage]
-    when: "$triage.output.route == 'plan'"
+    when: "$triage.output.contract == 'READY' && $triage.output.route == 'plan'"
 
   - id: gate-planned
     bash: echo '{"gate":"planned"}'
@@ -79,20 +99,21 @@ nodes:
     include: archon-deliver
     with:
       errors: "$INPUTS.errors"
+      validation_scope: "$INPUTS.validation_scope"
+      validation_context: "$INPUTS.validation_context"
       work: >-
         Deliver the work prepared by this run. Read $ARTIFACTS_DIR/triage.md
         first. When present, plan.md or investigation.md is the detailed work
         order and must be read in full; triage.md records which path produced it
         and which source assumptions were corrected. On the direct route,
-        triage.md itself is the verified work order. Original work item:
-        $INPUTS.target
+        triage.md itself is the verified work order.
     depends_on: [gate-direct, gate-rooted, gate-planned]
     trigger_rule: none_failed_min_one_success
 
   # One return for every legitimate terminal result. Negative advisory verdicts
   # complete with the report that explains them; delivery is reported from the
-  # pull request record the deliver branch returned (bound with if_skipped, so a
-  # skipped branch arrives as null) — see scripts/outcome.py.
+  # flip's verified URL the deliver branch returned (bound with if_skipped, so a
+  # skipped flip arrives as null) — see scripts/outcome.py.
   - id: outcome
     script: outcome
     runtime: uv
@@ -101,6 +122,7 @@ nodes:
     with:
       route: "$triage.output.route"
       summary: "$triage.output.summary"
+      contract: "$triage.output.contract"
       delivered: { from: "$deliver.output", if_skipped: null }
       # A passed spend gate with no delivered output means delivery STARTED and
       # died mid-flight — a different fact from an advisory stop, and the report

@@ -1,5 +1,5 @@
 # Dry-run fixture: the validate-RED path — initial review is clean but the project
-# gate fails, so the run fails at gate-validated (the new gate seen red).
+# gate fails, so the run fails at gate-validated (a direct dependency of flip-ready).
 # Run with --exec-code: gate-validated must EXECUTE to be seen red.
 #
 # The verdict below declares no `red_cause`, which makes this the guard for the
@@ -17,7 +17,7 @@ impl__implement:
   summary: "stub: implemented and green"
 impl__assert-changed: "3 files changed"
 gate-green: '{"gate":"green"}'
-pr__pr: { number: 2, url: "https://github.com/example/repo/pull/2", head: "fixture-branch", base: "dev", is_draft: true }
+pr__pr: { repo: { host: "github.com", path: "example/repo" }, number: 2, url: "https://github.com/example/repo/pull/2", head: "fixture-branch", base: "dev", is_draft: true }
 review__mode: '{"continuation":false}'
 review__scope: "PR diff in scope; head sha stubbed"
 review__code: "0 findings"
@@ -30,7 +30,11 @@ review__synthesize:
   findings_summary: "stub: clean on initial review"
 # gate-ready is deliberately unstubbed: under --exec-code the real script runs,
 # proving the review_ready binding and the corrections if_skipped default.
+validate__applicability: { fingerprint: fixture, scope: "", context: "", validator: fixture, generation: 1, reason: fixture, nonce: fixture, reuse: false }
 validate__validate:
+  green: false
+  summary: "stub: tests failed — 3 red"
+validate__selected-verdict:
   green: false
   summary: "stub: tests failed — 3 red"
 ci-probe: '{"state":"concluded","detail":"no checks configured on this repository — nothing to await"}'
@@ -41,6 +45,7 @@ classify:
   reasons:
     errors: "stub: the diff adds a retry and a fallback"
     docs: "stub: no doc-facing changes"
+validate__record-evidence: '{"recorded":true}'
 fixture:
   expect: failed
   fail-node: gate-validated

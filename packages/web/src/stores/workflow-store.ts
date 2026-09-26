@@ -62,6 +62,22 @@ function deriveActiveId(workflows: Map<string, WorkflowState>): string | null {
   return (running ?? newest)?.runId ?? null;
 }
 
+function updateActiveNodeIds(
+  activeNodeIds: string[] | undefined,
+  nodeId: string,
+  status: DagNodeEvent['status']
+): string[] | undefined {
+  if (activeNodeIds === undefined) return activeNodeIds;
+  if (status === 'running') {
+    return activeNodeIds.includes(nodeId) ? activeNodeIds : [...activeNodeIds, nodeId];
+  }
+  return activeNodeIds.filter(activeNodeId => activeNodeId !== nodeId);
+}
+
+function sameNodeIds(left: string[] | undefined, right: string[]): boolean {
+  return left?.length === right.length && left.every((nodeId, index) => nodeId === right[index]);
+}
+
 // --- Polling infrastructure ---
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -194,6 +210,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
                 runId: event.runId,
                 workflowName: event.workflowName,
                 status: event.status,
+                ...(isTerminalStatus(event.status) ? { activeNodeIds: [] } : {}),
                 dagNodes: [],
                 artifacts: [],
                 startedAt: event.timestamp,
@@ -210,6 +227,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
               next.set(event.runId, {
                 ...existing,
                 status: event.status,
+                ...(isTerminalStatus(event.status) ? { activeNodeIds: [] } : {}),
                 error: event.error,
                 completedAt: isTerminalStatus(event.status) ? event.timestamp : undefined,
                 approval: event.status === 'paused' ? event.approval : undefined,
@@ -261,6 +279,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
                 duration: event.duration,
                 error: event.error,
                 reason: event.reason,
+                cause: event.cause,
               };
 
               if (existingIdx >= 0) {
@@ -269,7 +288,13 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
                 dagNodes.push(nodeState);
               }
 
-              return { ...wf, dagNodes };
+              const activeNodeIds = updateActiveNodeIds(
+                wf.activeNodeIds,
+                event.nodeId,
+                event.status
+              );
+
+              return { ...wf, dagNodes, activeNodeIds };
             }),
           undefined,
           'workflow/dagNode'
@@ -508,10 +533,21 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
           state => {
             const existing = state.workflows.get(incoming.runId);
             if (existing) {
-              if (
-                !isTerminalStatus(incoming.status) ||
-                (existing.status !== 'running' && existing.status !== 'pending')
-              ) {
+              if (!isTerminalStatus(incoming.status)) {
+                if (isTerminalStatus(existing.status) || incoming.activeNodeIds === undefined) {
+                  return state;
+                }
+                if (sameNodeIds(existing.activeNodeIds, incoming.activeNodeIds)) {
+                  return state;
+                }
+                const next = new Map(state.workflows);
+                next.set(incoming.runId, {
+                  ...existing,
+                  activeNodeIds: incoming.activeNodeIds,
+                });
+                return { workflows: next, activeWorkflowId: deriveActiveId(next) };
+              }
+              if (existing.status !== 'running' && existing.status !== 'pending') {
                 return state;
               }
             }

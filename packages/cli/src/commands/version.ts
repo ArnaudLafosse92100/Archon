@@ -11,15 +11,19 @@ import { fileURLToPath } from 'url';
 import { execFileAsync } from '@archon/git';
 import {
   BUNDLED_GIT_COMMIT,
+  BUNDLED_GIT_REVISION,
   BUNDLED_IS_BINARY,
   BUNDLED_VERSION,
+  WORKFLOW_ERROR_CLASSES,
   createLogger,
 } from '@archon/paths';
 import { getDatabaseType } from '@archon/core';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '@archon/providers/types';
 
 const log = createLogger('cli:version');
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(SCRIPT_DIR, '../../../../');
 
 interface PackageJson {
   name: string;
@@ -31,7 +35,7 @@ interface PackageJson {
  */
 async function getDevVersion(): Promise<{ name: string; version: string }> {
   // Read root package.json (monorepo version), not the CLI package's own
-  const pkgPath = join(SCRIPT_DIR, '../../../../package.json');
+  const pkgPath = join(REPO_ROOT, 'package.json');
 
   let content: string;
   try {
@@ -57,13 +61,14 @@ async function getDevVersion(): Promise<{ name: string; version: string }> {
 }
 
 /**
- * Get the git commit hash at runtime (dev mode).
+ * Get the source checkout's full git revision at runtime (dev mode).
  * Returns 'unknown' if git is unavailable or the command fails.
  */
-async function getDevGitCommit(): Promise<string> {
+async function getDevGitRevision(): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], {
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
       timeout: 5000,
+      cwd: REPO_ROOT,
     });
     return stdout.trim();
   } catch (err) {
@@ -73,19 +78,85 @@ async function getDevGitCommit(): Promise<string> {
   }
 }
 
-export async function versionCommand(): Promise<void> {
+/** Preserve the established human-readable abbreviated commit output. */
+async function getDevGitCommit(): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], {
+      timeout: 5000,
+      cwd: REPO_ROOT,
+    });
+    return stdout.trim();
+  } catch (err) {
+    log.debug({ err }, 'version.git_commit_lookup_failed');
+    return 'unknown';
+  }
+}
+
+const NODE_FAILURE_CLASS_CONTRACT = {
+  version: 1,
+  values: WORKFLOW_ERROR_CLASSES,
+} as const;
+
+const CODEX_CREDENTIAL_POLICY_CONTRACT = {
+  version: 1,
+  requiredKinds: ['subscription'],
+  evidence: 'local_credential_resolution',
+} as const;
+
+const CLAUDE_CREDENTIAL_POLICY_CONTRACT = {
+  version: 1,
+  requiredKinds: ['subscription'],
+  evidence: 'local_credential_resolution',
+} as const;
+
+const PROVIDER_LAUNCH_ATTESTATION_CONTRACT = {
+  version: 1,
+  evidence: 'local_launch_preparation',
+  envPolicy: 'targeted_empty_overrides',
+  aliasSemantics: 'neutralized_not_absent',
+  strictClaudeNeutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
+  billingClaim: 'unverified',
+} as const;
+
+export async function versionCommand(json = false): Promise<void> {
   let version: string;
   let gitCommit: string;
+  let revision: string;
 
   if (BUNDLED_IS_BINARY) {
     // Compiled binary: use embedded version and commit
     version = BUNDLED_VERSION;
     gitCommit = BUNDLED_GIT_COMMIT;
+    revision = BUNDLED_GIT_REVISION;
   } else {
     // Development mode: read from package.json and git
     const devInfo = await getDevVersion();
     version = devInfo.version;
-    gitCommit = await getDevGitCommit();
+    if (json) {
+      revision = await getDevGitRevision();
+      gitCommit = revision === 'unknown' ? revision : revision.slice(0, 7);
+    } else {
+      gitCommit = await getDevGitCommit();
+      revision = 'unknown';
+    }
+  }
+
+  if (json) {
+    console.log(
+      JSON.stringify({
+        name: 'archon',
+        version,
+        revision,
+        capabilities: ['archon-auth-context-v1', 'codegraph_managed_v1'],
+        contracts: {
+          'node_failed.data.error_class': NODE_FAILURE_CLASS_CONTRACT,
+          'workflow.credential_policy.codex': CODEX_CREDENTIAL_POLICY_CONTRACT,
+          'workflow.credential_policy.claude': CLAUDE_CREDENTIAL_POLICY_CONTRACT,
+          'workflow.provider_launch_attestation': PROVIDER_LAUNCH_ATTESTATION_CONTRACT,
+        },
+      })
+    );
+    return;
   }
 
   const platform = process.platform;

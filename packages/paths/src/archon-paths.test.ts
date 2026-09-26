@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { homedir, tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join, sep } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { mkdir, rm, writeFile, lstat, readlink, symlink as fsSymlink } from 'fs/promises';
 import { removeTempTree } from './test-utils';
@@ -28,6 +28,7 @@ import {
   expandTilde,
   canonicalizeProjectPath,
   getAppArchonBasePath,
+  getSourceWebDistDir,
   getDefaultCommandsPath,
   getDefaultWorkflowsPath,
   logArchonPaths,
@@ -45,7 +46,12 @@ import {
   getScopeArtifactsPath,
   resolveProjectStorageKey,
   getProjectStoragePaths,
+  resolveRunStorageRoot,
   getRunArtifactsDirForKey,
+  getRunLogPathForRoot,
+  getRunWorkflowSourceDirForRoot,
+  getRunArtifactsDirForRoot,
+  getStoragePathsForRoot,
   slugifyFolderName,
   getFolderProjectRoot,
   getFolderProjectArtifactsPath,
@@ -478,6 +484,19 @@ describe('archon-paths', () => {
     });
   });
 
+  describe('getSourceWebDistDir', () => {
+    test('points at the web package build output in this checkout', () => {
+      const path = getSourceWebDistDir();
+      expect(path.endsWith(join('packages', 'web', 'dist'))).toBe(true);
+      // Anchored on the package that owns the build rather than on a second copy
+      // of the same path arithmetic: `bun run build:web` writes this directory,
+      // and `archon serve` refuses to start without it.
+      const webPackageJson = join(dirname(path), 'package.json');
+      expect(existsSync(webPackageJson)).toBe(true);
+      expect(JSON.parse(readFileSync(webPackageJson, 'utf8')).name).toBe('@archon/web');
+    });
+  });
+
   describe('getDefaultCommandsPath', () => {
     test('returns commands/defaults under app archon base', () => {
       delete process.env.ARCHON_DOCKER;
@@ -674,23 +693,25 @@ describe('archon-paths', () => {
       process.env.ARCHON_HOME = '/custom/archon';
     });
 
-    test('repo key composes all four roots under owner/repo', () => {
+    test('repo key composes every root under owner/repo', () => {
       const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
       expect(getProjectStoragePaths({ kind: 'repo', owner: 'acme', repo: 'widget' })).toEqual({
         root,
         artifactsRoot: join(root, 'artifacts'),
         logsDir: join(root, 'logs'),
         stateRoot: join(root, 'state'),
+        workflowSourceRoot: join(root, 'workflow-source'),
       });
     });
 
-    test('folder key composes all four roots under _folder/<slug>', () => {
+    test('folder key composes every root under _folder/<slug>', () => {
       const root = join('/custom/archon', 'workspaces', '_folder', 'my-ops-folder');
       expect(getProjectStoragePaths({ kind: 'folder', slug: 'my-ops-folder' })).toEqual({
         root,
         artifactsRoot: join(root, 'artifacts'),
         logsDir: join(root, 'logs'),
         stateRoot: join(root, 'state'),
+        workflowSourceRoot: join(root, 'workflow-source'),
       });
     });
 
@@ -702,6 +723,7 @@ describe('archon-paths', () => {
         artifactsRoot: join(root, 'artifacts'),
         logsDir: join(root, 'logs'),
         stateRoot: join(root, 'state'),
+        workflowSourceRoot: join(root, 'workflow-source'),
       });
       // Build both expectations with join() — on Windows the separators differ
       // from the POSIX literals and a hard-coded '/custom/archon' never matches.
@@ -733,6 +755,37 @@ describe('archon-paths', () => {
     });
   });
 
+  describe('resolveRunStorageRoot', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('keeps a trusted persisted root when the codebase was renamed', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'original');
+      expect(
+        resolveRunStorageRoot(
+          { output_root: root },
+          { kind: 'repo', name: 'acme/renamed', default_cwd: '/repos/renamed' }
+        )
+      ).toBe(root);
+    });
+
+    test('re-derives an out-of-tree persisted root under the current home', () => {
+      expect(
+        resolveRunStorageRoot(
+          { output_root: '/previous/archon/home/workspaces/_local/workspace' },
+          { kind: 'repo', name: 'workspace', default_cwd: '/home/u/workspace' }
+        )
+      ).toBe(join('/custom/archon', 'workspaces', '_local', 'workspace'));
+    });
+
+    test('rejects an untrusted root when no codebase can re-derive it', () => {
+      expect(resolveRunStorageRoot({ output_root: '/etc' }, null)).toBeNull();
+    });
+  });
+
   describe('getRunArtifactsDirForKey', () => {
     beforeEach(() => {
       delete process.env.WORKSPACE_PATH;
@@ -756,6 +809,42 @@ describe('archon-paths', () => {
       expect(getRunArtifactsDirForKey({ kind: 'cwd', cwd: '/home/u/scratch' }, 'run-1')).toBe(
         join('/custom/archon', 'workspaces', '_cwd', 'scratch', 'artifacts', 'runs', 'run-1')
       );
+    });
+  });
+
+  describe('getRunLogPathForRoot', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('composes a transcript path from a persisted project root', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
+      expect(getRunLogPathForRoot(root, 'run-1')).toBe(join(root, 'logs', 'run-1.jsonl'));
+    });
+
+    test('agrees with the repo-specific helper', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
+      expect(getRunLogPath('acme', 'widget', 'run-1')).toBe(getRunLogPathForRoot(root, 'run-1'));
+    });
+  });
+
+  describe('getRunWorkflowSourceDirForRoot', () => {
+    beforeEach(() => {
+      delete process.env.WORKSPACE_PATH;
+      delete process.env.ARCHON_DOCKER;
+      process.env.ARCHON_HOME = '/custom/archon';
+    });
+
+    test('composes a run source path beside, not inside, the run artifacts', () => {
+      const root = join('/custom/archon', 'workspaces', 'acme', 'widget');
+      const source = getRunWorkflowSourceDirForRoot(root, 'run-1');
+      expect(source).toBe(join(root, 'workflow-source', 'runs', 'run-1'));
+      // The failure this guards: a capture placed under `$ARTIFACTS_DIR` is handed to
+      // every node by path and listed as the run's output.
+      expect(source.startsWith(getRunArtifactsDirForRoot(root, 'run-1') + sep)).toBe(false);
+      expect(getStoragePathsForRoot(root).workflowSourceRoot).toBe(join(root, 'workflow-source'));
     });
   });
 
@@ -1312,6 +1401,34 @@ describe.skipIf(isWindows)('findMarkdownFilesRecursive - symlinks', () => {
     ]);
   });
 
+  test('returns entries in name order regardless of creation order', async () => {
+    // Created in reverse-alphabetical order at every level. On a filesystem
+    // that reports creation order (ext4 without dir_index, tmpfs), an unsorted
+    // walk returns this tree reversed.
+    for (const name of ['zeta', 'mid', 'alpha']) {
+      const dir = join(tempDir, name);
+      await mkdir(dir);
+      for (const leaf of ['z-leaf', 'a-leaf']) {
+        await writeFile(join(dir, `${leaf}.md`), `# ${leaf}`);
+      }
+    }
+    await writeFile(join(tempDir, 'z-root.md'), '# z-root');
+    await writeFile(join(tempDir, 'a-root.md'), '# a-root');
+
+    const files = await findMarkdownFilesRecursive(tempDir);
+
+    expect(files.map(file => file.relativePath)).toEqual([
+      'a-root.md',
+      join('alpha', 'a-leaf.md'),
+      join('alpha', 'z-leaf.md'),
+      join('mid', 'a-leaf.md'),
+      join('mid', 'z-leaf.md'),
+      'z-root.md',
+      join('zeta', 'a-leaf.md'),
+      join('zeta', 'z-leaf.md'),
+    ]);
+  });
+
   test('preserves sibling symlink aliases that point to the same directory', async () => {
     const localSourceDir = join(tempDir, 'source');
     await mkdir(localSourceDir);
@@ -1319,9 +1436,12 @@ describe.skipIf(isWindows)('findMarkdownFilesRecursive - symlinks', () => {
     await fsSymlink(localSourceDir, join(tempDir, 'alias'));
 
     const files = await findMarkdownFilesRecursive(tempDir);
-    const relativePaths = files.map(file => file.relativePath).sort();
 
-    expect(relativePaths).toEqual([join('alias', 'foo.md'), join('source', 'foo.md')]);
+    // No sort: 'alias' precedes 'source', and the walk defines that order.
+    expect(files.map(file => file.relativePath)).toEqual([
+      join('alias', 'foo.md'),
+      join('source', 'foo.md'),
+    ]);
   });
 
   test('skips broken symlinks silently', async () => {

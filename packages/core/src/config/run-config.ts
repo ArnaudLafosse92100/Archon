@@ -18,10 +18,11 @@ import {
   type WorkflowRunConfigMetadata,
   type WorkflowRunConfigSource,
 } from '@archon/workflows/schemas/run-config';
-import { decryptToken, encryptToken, getEncryptionKey } from '../utils/token-crypto';
+import { encryptToken, getEncryptionKey } from '../utils/token-crypto';
 import type { GlobalConfig, RepoConfig } from './config-types';
+import { unsealWorkflowRunConfigStructure } from './run-config-handoff';
 
-type ConfigKey = keyof GlobalConfig | keyof RepoConfig;
+type ConfigKey = keyof GlobalConfig | keyof RepoConfig | 'credentialPolicy';
 type KeyClassification = { kind: 'runtime' } | { kind: 'unavailable'; reason: string };
 
 const keyClassifications = {
@@ -33,6 +34,8 @@ const keyClassifications = {
   workflows: { kind: 'runtime' },
   docs: { kind: 'runtime' },
   env: { kind: 'runtime' },
+  credentialPolicy: { kind: 'runtime' },
+  managedResources: { kind: 'runtime' },
   commands: {
     kind: 'unavailable',
     reason: 'workflow and command discovery already ran before run dispatch',
@@ -114,7 +117,7 @@ function normalizePreset(path: string, preset: ModelAliasPreset): ModelAliasPres
 }
 
 /** Validate and normalize constraints owned by the live provider registry and lifecycle. */
-function normalizeRunConfigSemantics(layer: WorkflowRunConfigLayer): WorkflowRunConfigLayer {
+export function normalizeRunConfigSemantics(layer: WorkflowRunConfigLayer): WorkflowRunConfigLayer {
   if (layer.assistant !== undefined) {
     assertRegisteredProvider(layer.assistant, 'assistant');
   }
@@ -211,6 +214,8 @@ export function parseWorkflowRunConfig(
     ...(value.workflows !== undefined ? { workflows: value.workflows } : {}),
     ...(isRecord(docs) && docs.path !== undefined ? { docsPath: docs.path } : {}),
     ...(value.env !== undefined ? { envVars: value.env } : {}),
+    ...(value.credentialPolicy !== undefined ? { credentialPolicy: value.credentialPolicy } : {}),
+    ...(value.managedResources !== undefined ? { managedResources: value.managedResources } : {}),
   };
   const parsed = workflowRunConfigLayerSchema.safeParse(candidate);
   if (!parsed.success) throw validationError(parsed.error);
@@ -250,6 +255,15 @@ function configuredKeyPaths(layer: WorkflowRunConfigLayer): string[] {
   for (const field of Object.keys(layer.workflows ?? {})) paths.push(`workflows.${field}`);
   if (layer.docsPath !== undefined) paths.push('docs.path');
   for (const name of Object.keys(layer.envVars ?? {})) paths.push(`env.${name}`);
+  if (layer.credentialPolicy?.providers.codex !== undefined) {
+    paths.push('credentialPolicy.providers.codex.requiredKind');
+  }
+  if (layer.credentialPolicy?.providers.claude !== undefined) {
+    paths.push('credentialPolicy.providers.claude.requiredKind');
+  }
+  if (layer.managedResources?.codegraph !== undefined) {
+    paths.push('managedResources.codegraph.mode');
+  }
   return paths.sort();
 }
 
@@ -270,21 +284,5 @@ export function sealWorkflowRunConfig(
 export function unsealWorkflowRunConfig(
   metadata: WorkflowRunConfigMetadata
 ): WorkflowRunConfigLayer {
-  let plaintext: string;
-  try {
-    plaintext = decryptToken(metadata.ciphertext, getEncryptionKey());
-  } catch {
-    throw new Error('Workflow run config could not be decrypted.');
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(plaintext) as unknown;
-  } catch {
-    throw new Error('Workflow run config payload is not valid JSON.');
-  }
-  const parsed = workflowRunConfigLayerSchema.safeParse(value);
-  if (!parsed.success) {
-    throw new Error('Workflow run config payload is invalid.');
-  }
-  return normalizeRunConfigSemantics(parsed.data);
+  return normalizeRunConfigSemantics(unsealWorkflowRunConfigStructure(metadata));
 }

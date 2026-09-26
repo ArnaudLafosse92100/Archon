@@ -9,6 +9,7 @@ import {
   sealWorkflowRunConfig,
   unsealWorkflowRunConfig,
 } from './run-config';
+import { decodeWorkflowRunConfigHandoff } from './run-config-handoff';
 
 const TEST_KEY = 'ab'.repeat(32);
 let previousKey: string | undefined;
@@ -39,6 +40,7 @@ describe('workflow run config', () => {
         workflows: { quotaMaxAttempts: 3 },
         docs: { path: 'handbook' },
         env: { BENCH_TOKEN: 'top-secret' },
+        managedResources: { codegraph: { mode: 'required' } },
       },
       { kind: 'http', label: 'inline' }
     );
@@ -53,6 +55,7 @@ describe('workflow run config', () => {
         workflows: { quotaMaxAttempts: 3 },
         docsPath: 'handbook',
         envVars: { BENCH_TOKEN: 'top-secret' },
+        managedResources: { codegraph: { mode: 'required' } },
       },
     });
   });
@@ -165,7 +168,7 @@ describe('workflow run config', () => {
         },
         { kind: 'http', label: 'inline' }
       )
-    ).toThrow("Invalid run config at 'tiers.medium.thinking'");
+    ).toThrow(/tiers\.medium\.thinking.*effort:/);
   });
 
   it('rejects Pi defaults whose consumers own process-lifetime state', () => {
@@ -207,7 +210,7 @@ describe('workflow run config', () => {
     }
   });
 
-  it('rejects Claude-shaped thinking presets for providers that ignore that shape', () => {
+  it('rejects retired thinking presets for every provider and names effort', () => {
     for (const provider of ['pi', 'copilot']) {
       expect(() =>
         parseWorkflowRunConfig(
@@ -218,7 +221,7 @@ describe('workflow run config', () => {
           },
           { kind: 'http', label: 'inline' }
         )
-      ).toThrow("Invalid run config at 'tiers.large.thinking'");
+      ).toThrow(/tiers\.large\.thinking.*effort:/);
     }
   });
 
@@ -264,6 +267,7 @@ describe('workflow run config', () => {
       {
         assistants: { pi: { extensionFlags: { auth: 'provider-secret' } } },
         env: { TOKEN: 'env-secret' },
+        managedResources: { codegraph: { mode: 'optional' } },
       },
       { kind: 'cli', label: 'config.minimax.yaml' }
     );
@@ -272,8 +276,54 @@ describe('workflow run config', () => {
 
     expect(serialized).not.toContain('provider-secret');
     expect(serialized).not.toContain('env-secret');
-    expect(metadata.keys).toEqual(['assistants.pi.extensionFlags', 'env.TOKEN']);
+    expect(metadata.keys).toEqual([
+      'assistants.pi.extensionFlags',
+      'env.TOKEN',
+      'managedResources.codegraph.mode',
+    ]);
     expect(unsealWorkflowRunConfig(metadata)).toEqual(input.layer);
+  });
+
+  it('seals and restores provider subscription policies without exposing their values', () => {
+    const input = parseWorkflowRunConfig(
+      {
+        credentialPolicy: {
+          providers: {
+            codex: { requiredKind: 'subscription' },
+            claude: { requiredKind: 'subscription' },
+          },
+        },
+      },
+      { kind: 'cli', label: 'config.yaml' }
+    );
+    const metadata = sealWorkflowRunConfig(input.layer, input.source);
+    const serialized = JSON.stringify(metadata);
+
+    expect(metadata.keys).toContain('credentialPolicy.providers.codex.requiredKind');
+    expect(metadata.keys).toContain('credentialPolicy.providers.claude.requiredKind');
+    expect(serialized).not.toContain('subscription');
+    expect(unsealWorkflowRunConfig(metadata)).toEqual(input.layer);
+  });
+
+  it('rejects unsupported credential policy kinds and providers', () => {
+    expect(() =>
+      parseWorkflowRunConfig(
+        { credentialPolicy: { providers: {} } },
+        { kind: 'http', label: 'inline' }
+      )
+    ).toThrow();
+    expect(() =>
+      parseWorkflowRunConfig(
+        { credentialPolicy: { providers: { codex: { requiredKind: 'api_key' } } } },
+        { kind: 'http', label: 'inline' }
+      )
+    ).toThrow();
+    expect(() =>
+      parseWorkflowRunConfig(
+        { credentialPolicy: { providers: { openrouter: { requiredKind: 'subscription' } } } },
+        { kind: 'http', label: 'inline' }
+      )
+    ).toThrow();
   });
 
   it('fails explicitly when persisted ciphertext is tampered with', () => {
@@ -285,6 +335,18 @@ describe('workflow run config', () => {
     expect(() =>
       unsealWorkflowRunConfig({ ...metadata, ciphertext: `${metadata.ciphertext.slice(0, -2)}xx` })
     ).toThrow('could not be decrypted');
+  });
+
+  it('decodes a detached handoff before provider-dependent normalization', () => {
+    const metadata = sealWorkflowRunConfig(
+      { assistant: 'not-registered' },
+      { kind: 'cli', label: 'config.yaml' }
+    );
+
+    expect(decodeWorkflowRunConfigHandoff(JSON.stringify(metadata))).toEqual({
+      source: { kind: 'cli', label: 'config.yaml' },
+      layer: { assistant: 'not-registered' },
+    });
   });
 
   it('loads a CLI YAML file through the strict parser', async () => {

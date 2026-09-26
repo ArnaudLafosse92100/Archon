@@ -7,10 +7,14 @@
  *
  *   fixture:
  *     expect: completed          # or failed / paused / cancelled
- *     fail-node: gate-ready      # required iff expect: failed
+ *     fail-node: gate-ready      # required iff expect: failed; a list names the
+ *                                # exact failed set (a loop body failure is two
+ *                                # entries: the node and its group)
  *     reached: [review__docs]    # nodes that must complete or be stubbed, under any expect
  *     inputs:                    # caller-supplied declared-input values
  *       branch: "task-123"
+ *     resolved-text-contains:    # fragments that must appear in a reached node's resolved text
+ *       implement: "task-123"
  *   exec-code: false             # execute script/bash nodes instead of stubbing
  *
  * Every remaining key is a node-id → stub-output entry, exactly what
@@ -40,6 +44,7 @@ import {
 import type { WorkflowWithSource } from './schemas/workflow';
 import type { WorkflowConfig } from './deps';
 import type { ResolvedAiProfile } from './model-validation';
+import { resolveTopLevelInputs } from './utils/workflow-requirements';
 import {
   captureWorkflowSource,
   capturedSourceRoots,
@@ -58,9 +63,13 @@ function getLog(): ReturnType<typeof createLogger> {
 export const fixtureDeclarationSchema = z
   .object({
     expect: z.enum(['completed', 'failed', 'paused', 'cancelled']).default('completed'),
-    'fail-node': z.string().optional(),
+    // A single node id, or the exact set of failed entries when one failure
+    // implies another — a node failing inside a loop_group fails the group
+    // too, so that shape is always two entries and was inexpressible before.
+    'fail-node': z.union([z.string(), z.array(z.string()).nonempty()]).optional(),
     reached: z.array(z.string()).optional(),
     inputs: z.record(z.string(), z.string()).optional(),
+    'resolved-text-contains': z.record(z.string(), z.string()).optional(),
   })
   .refine(decl => decl.expect !== 'failed' || decl['fail-node'] !== undefined, {
     message: "fail-node is required when expect is 'failed'",
@@ -145,7 +154,10 @@ interface DiscoveredFixture {
   readonly workflowNames: readonly string[];
 }
 
-/** Collect every `*.yaml` sibling of a `fixtures/` dir and read its declared workflow names. */
+/**
+ * Collect every `*.yaml` sibling of a `fixtures/` dir and read its declared workflow
+ * names. Sorted: these names reach the operator in a no-matching-workflow failure.
+ */
 async function workflowNamesBeside(fixturesDir: string): Promise<string[]> {
   const parent = join(fixturesDir, '..');
   const names: string[] = [];
@@ -167,42 +179,67 @@ async function workflowNamesBeside(fixturesDir: string): Promise<string[]> {
       );
     }
   }
-  return [...new Set(names)];
+  // Sorted, not merely deduped: two sibling workflow YAMLs beside one fixtures/ dir
+  // would otherwise yield names in filesystem order, and these reach the operator in
+  // a no-matching-workflow failure. Covered by the two-sibling test.
+  return [...new Set(names)].sort();
 }
 
+/** Every fixture file directly inside one `fixtures/` directory. */
+async function fixturesInDir(
+  scopeRoot: string,
+  workflowDir: string,
+  fixturesDir: string
+): Promise<DiscoveredFixture[]> {
+  const dirs = relative(scopeRoot, workflowDir)
+    .split(sep)
+    .filter(segment => segment.length > 0);
+  const workflowNames = await workflowNamesBeside(fixturesDir);
+  // No catch: the walk already saw this directory, so a read failure here is a real
+  // fault (EACCES/EIO), not an absence. Swallowing it would let `workflow test` exit 0
+  // having silently skipped a directory instead of certifying it.
+  const files = await readdir(fixturesDir);
+  return files
+    .filter(file => file.endsWith(FIXTURE_SUFFIX))
+    .map(file => ({
+      label: [...dirs, FIXTURES_DIR, file].join('/'),
+      dirs,
+      path: join(fixturesDir, file),
+      workflowNames,
+    }));
+}
+
+/** Depth-first walk below one scope root, in whatever order the filesystem yields. */
 async function walkForFixtures(
   scopeRoot: string,
-  root: string,
-  depth: number,
-  out: DiscoveredFixture[]
-): Promise<void> {
-  if (depth > MAX_WALK_DEPTH) return;
-  let entries;
-  try {
-    entries = await readdir(root, { withFileTypes: true });
-  } catch {
-    return;
-  }
+  dir: string,
+  depth: number
+): Promise<DiscoveredFixture[]> {
+  if (depth > MAX_WALK_DEPTH) return [];
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  const found: DiscoveredFixture[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const dirPath = join(root, entry.name);
-    if (entry.name === FIXTURES_DIR) {
-      const dirs = relative(scopeRoot, root)
-        .split(sep)
-        .filter(segment => segment.length > 0);
-      for (const file of await readdir(dirPath)) {
-        if (!file.endsWith(FIXTURE_SUFFIX)) continue;
-        out.push({
-          label: [...dirs, FIXTURES_DIR, file].join('/'),
-          dirs,
-          path: join(dirPath, file),
-          workflowNames: await workflowNamesBeside(dirPath),
-        });
-      }
-      continue;
-    }
-    await walkForFixtures(scopeRoot, dirPath, depth + 1, out);
+    const path = join(dir, entry.name);
+    found.push(
+      ...(entry.name === FIXTURES_DIR
+        ? await fixturesInDir(scopeRoot, dir, path)
+        : await walkForFixtures(scopeRoot, path, depth + 1))
+    );
   }
+  return found;
+}
+
+/**
+ * Fixtures under one scope root, ordered by label.
+ *
+ * `readdir` yields filesystem order, which is not stable across machines or
+ * filesystems, and this order reaches the report a human reads. Sorting here is the
+ * single point that defines it; nothing downstream reorders.
+ */
+async function fixturesUnderScope(scopeRoot: string): Promise<DiscoveredFixture[]> {
+  const found = await walkForFixtures(scopeRoot, scopeRoot, 0);
+  return found.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 
 async function discoverFixtures(roots: readonly string[]): Promise<DiscoveredFixture[]> {
@@ -214,21 +251,15 @@ async function discoverFixtures(roots: readonly string[]): Promise<DiscoveredFix
     // canonical spellings and a target spelled through a symlink still matches
     // (e.g. macOS /tmp → /private/tmp).
     const scopeRoot = await realpath(root).catch(() => root);
-    const before = found.length;
-    await walkForFixtures(scopeRoot, scopeRoot, 0, found);
-    for (let i = before; i < found.length; i++) {
+    for (const fixture of await fixturesUnderScope(scopeRoot)) {
       // Keyed on the scope-relative label, not the absolute path: an absolute path is
       // unique per scope by construction, so keying on it would never dedup anything and
       // a project copy of a bundled workflow would run both fixtures. The label is what
       // makes an override shadow the copy it overrides, matching how `workflow-discovery`
       // resolves the same scope chain for the workflow files themselves.
-      if (seen.has(found[i].label)) {
-        // Higher-precedence scope already discovered this fixture.
-        found.splice(i, 1);
-        i--;
-      } else {
-        seen.add(found[i].label);
-      }
+      if (seen.has(fixture.label)) continue;
+      seen.add(fixture.label);
+      found.push(fixture);
     }
   }
   return found;
@@ -239,6 +270,7 @@ export interface FixtureCheckResult {
   readonly workflow: string;
   readonly expect: DryRunResult['outcome'];
   readonly outcome?: DryRunResult['outcome'];
+  readonly authoredOutcome?: DryRunResult['authoredOutcome'];
   readonly pass: boolean;
   readonly failureReason?: string;
   readonly missingStubs: readonly string[];
@@ -338,7 +370,7 @@ async function withCapturedFixtureSource<T>(
     );
   }
   try {
-    return await fn(capturedSourceRoots(capture.captureRoot, capture.manifest.source_config));
+    return await fn(capturedSourceRoots(capture.anchor));
   } finally {
     await rm(captureRoot, { recursive: true, force: true }).catch((error: unknown) => {
       getLog().warn(
@@ -559,13 +591,14 @@ async function checkFixture(
   };
   try {
     const execCode = parsed.execCode;
+    const inputs = resolveTopLevelInputs(ws.workflow, parsed.declaration.inputs);
     const run = (workspace: string): Promise<DryRunResult> =>
       dryRunWorkflow({
         workflow: ws.workflow,
         userMessage: '',
         cwd: options.cwd,
         stubs: parsed.stubs,
-        ...(parsed.declaration.inputs ? { inputs: parsed.declaration.inputs } : {}),
+        ...(inputs ? { inputs } : {}),
         execCode,
         execWorkspace: workspace,
         sourceRoots: captured,
@@ -579,10 +612,13 @@ async function checkFixture(
       failureReason = `expected ${parsed.declaration.expect}, dry-run reported ${result.outcome}`;
     } else if (parsed.declaration.expect === 'failed') {
       const failures = result.trace.filter(entry => entry.state === 'failed');
-      if (failures.length !== 1 || failures[0].nodeId !== parsed.declaration['fail-node']) {
+      const declared = parsed.declaration['fail-node'];
+      const expected = (typeof declared === 'string' ? [declared] : [...(declared ?? [])]).sort();
+      const actual = failures.map(f => f.nodeId).sort();
+      if (expected.length !== actual.length || expected.some((id, i) => id !== actual[i])) {
         failureReason =
-          `expected exactly one failed trace entry on '${parsed.declaration['fail-node']}', got ` +
-          failures.map(f => f.nodeId).join(', ');
+          `expected exactly the failed trace entries [${expected.join(', ')}], got ` +
+          (actual.join(', ') || '(none)');
       }
     }
     // Checked whenever declared, never chained after the outcome branches above: a
@@ -598,6 +634,25 @@ async function checkFixture(
       );
       if (missingReached.length > 0) {
         failureReason = `required nodes did not complete: ${missingReached.join(', ')}`;
+      }
+    }
+    if (failureReason === undefined && parsed.declaration['resolved-text-contains'] !== undefined) {
+      for (const [nodeId, expectedText] of Object.entries(
+        parsed.declaration['resolved-text-contains']
+      )) {
+        const traceEntries = result.trace.filter(
+          entry =>
+            entry.nodeId === nodeId &&
+            (entry.state === 'completed' || entry.state === 'stubbed' || entry.state === 'paused')
+        );
+        if (traceEntries.length === 0) {
+          failureReason = `expected resolved text for node '${nodeId}', but it was not reached`;
+          break;
+        }
+        if (!traceEntries.some(entry => entry.resolvedText?.includes(expectedText) === true)) {
+          failureReason = `expected node '${nodeId}' resolved text to contain ${JSON.stringify(expectedText)}`;
+          break;
+        }
       }
     }
     // A `trigger_rule: all_done` join tolerates its own missing stub (#2869) — it never
@@ -617,6 +672,7 @@ async function checkFixture(
     return {
       ...base,
       outcome: result.outcome,
+      authoredOutcome: result.authoredOutcome,
       pass: failureReason === undefined,
       ...(failureReason !== undefined ? { failureReason } : {}),
       missingStubs: result.missingStubs,
@@ -640,8 +696,11 @@ export function formatFixtureReport(report: FixtureReport): string {
   const lines: string[] = [];
   for (const r of report.results) {
     const mark = r.pass ? '✔' : '✘';
-    const outcome = r.outcome ? ` (${r.outcome})` : '';
-    lines.push(`${mark} ${r.fixture} → ${r.workflow}${outcome}`);
+    lines.push(`${mark} ${r.fixture} → ${r.workflow}`);
+    if (r.outcome !== undefined) {
+      lines.push(`    Simulation outcome: ${r.outcome}`);
+      lines.push(`    Authored outcome: ${r.authoredOutcome ?? 'undeclared'}`);
+    }
     if (r.failureReason) lines.push(`    ${r.failureReason}`);
     if (r.unusedStubs.length > 0) {
       lines.push(`    warning: unused stubs — ${r.unusedStubs.join(', ')}`);

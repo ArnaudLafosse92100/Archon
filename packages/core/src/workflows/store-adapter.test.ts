@@ -1,5 +1,7 @@
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
-import type { IWorkflowStore } from '@archon/workflows/store';
+import type { DagResumeSnapshot, IWorkflowStore } from '@archon/workflows/store';
+import type { WorkflowRunStatus } from '@archon/workflows/schemas/workflow-run';
+import type { ResolvedCredential } from '../credentials/delivery';
 
 // Mock DB modules before importing store-adapter
 const mockCreateWorkflowRun = mock(() => Promise.resolve({ id: 'run-1' }));
@@ -12,13 +14,16 @@ const mockResumeWorkflowRun = mock(() => Promise.resolve({ id: 'run-1' }));
 const mockRecoverCancelledFanOutRun = mock(() => Promise.resolve({ id: 'run-1' }));
 const mockUpdateWorkflowRun = mock(() => Promise.resolve());
 const mockUpdateWorkflowActivity = mock(() => Promise.resolve());
-const mockGetWorkflowRunStatus = mock(() => Promise.resolve('running'));
+const mockGetWorkflowRunStatus = mock<(_id: string) => Promise<WorkflowRunStatus | null>>(() =>
+  Promise.resolve('running')
+);
 const mockCompleteWorkflowRun = mock(() => Promise.resolve());
 const mockFailWorkflowRun = mock(() => Promise.resolve());
 const mockCancelWorkflowRun = mock(() => Promise.resolve());
 const mockCancelFanOutRun = mock(() => Promise.resolve());
 const mockPauseWorkflowRun = mock(() => Promise.resolve());
 const mockPauseWorkflowRunForWait = mock(() => Promise.resolve());
+const mockFailPausedAttentionWait = mock(() => Promise.resolve({ failed: true }));
 const mockClearWorkflowWaitContext = mock(() => Promise.resolve({ cleared: true }));
 // Backs createWorkflowStore()'s rewriteApprovalContext (#2707 step 3 pause
 // escalation) — per AGENTS.md's mock.module rule, an export the factory omits
@@ -44,6 +49,7 @@ mock.module('../db/workflows', () => ({
   cancelFanOutRun: mockCancelFanOutRun,
   pauseWorkflowRun: mockPauseWorkflowRun,
   pauseWorkflowRunForWait: mockPauseWorkflowRunForWait,
+  failPausedAttentionWait: mockFailPausedAttentionWait,
   clearWorkflowWaitContext: mockClearWorkflowWaitContext,
   resolveApprovalGate: mockResolveApprovalGate,
   claimWriteback: mock(() => Promise.resolve({ claimed: true })),
@@ -53,10 +59,13 @@ mock.module('../db/workflows', () => ({
 const mockCreateWorkflowEvent = mock(() => Promise.resolve());
 const mockPersistWorkflowEvent = mock(() => Promise.resolve());
 const mockPersistWorkflowEventIfRunning = mock(() => Promise.resolve({ persisted: true }));
-const mockGetDagResumeSnapshot = mock(() =>
+const mockGetDagResumeSnapshot = mock<(_id: string) => Promise<DagResumeSnapshot>>(() =>
   Promise.resolve({
-    completedNodeOutputs: new Map<string, string>(),
+    completedNodeOutputs: new Map(),
+    fanOutSnapshots: new Map(),
+    unresolvedNodeStarts: new Set(),
     tokens: { input: 0, output: 0 },
+    costUsd: 0,
   })
 );
 mock.module('../db/workflow-events', () => ({
@@ -66,7 +75,8 @@ mock.module('../db/workflow-events', () => ({
   getDagResumeSnapshot: mockGetDagResumeSnapshot,
 }));
 
-const mockGetCodebase = mock(() => Promise.resolve(null));
+type StoredCodebase = Awaited<ReturnType<IWorkflowStore['getCodebase']>>;
+const mockGetCodebase = mock<(_id: string) => Promise<StoredCodebase>>(() => Promise.resolve(null));
 mock.module('../db/codebases', () => ({
   getCodebase: mockGetCodebase,
 }));
@@ -113,9 +123,14 @@ mock.module('../credentials/config', () => ({
   isPerUserProviderKeysEnabled: mockIsPerUserProviderKeysEnabled,
 }));
 
-const mockListDecryptedUserProviderCredentials = mock(async () => []);
+const mockListDecryptedUserProviderCredentials = mock<
+  (_userId: string) => Promise<{
+    credentials: { provider: string; cred: ResolvedCredential }[];
+    issues: { provider?: string; code: 'credential_unusable' | 'resolution_failed' }[];
+  }>
+>(async () => ({ credentials: [], issues: [] }));
 mock.module('../db/user-provider-key-store', () => ({
-  listDecryptedUserProviderCredentials: mockListDecryptedUserProviderCredentials,
+  listDecryptedUserProviderCredentialsWithIssues: mockListDecryptedUserProviderCredentials,
   saveUserProviderKey: mock(() => Promise.resolve()),
   getUserProviderKeyRecord: mock(() => Promise.resolve(null)),
   listUserProviderKeys: mock(() => Promise.resolve([])),
@@ -170,6 +185,7 @@ describe('createWorkflowStore', () => {
       'failWorkflowRun',
       'pauseWorkflowRun',
       'pauseWorkflowRunForWait',
+      'failPausedAttentionWait',
       'clearWorkflowWaitContext',
       'rewriteApprovalContext',
       'claimWriteback',
@@ -215,7 +231,7 @@ describe('createWorkflowStore', () => {
     await expect(
       store.createWorkflowEvent({
         workflow_run_id: 'run-1',
-        event_type: 'step_started',
+        event_type: 'node_started',
         step_index: 0,
         step_name: 'test-step',
       })
@@ -223,9 +239,12 @@ describe('createWorkflowStore', () => {
   });
 
   test('delegates getDagResumeSnapshot to DB', async () => {
-    const expected = {
-      completedNodeOutputs: new Map([['step1', 'output text']]),
+    const expected: DagResumeSnapshot = {
+      completedNodeOutputs: new Map([['step1', { output: 'output text' }]]),
+      fanOutSnapshots: new Map(),
+      unresolvedNodeStarts: new Set(),
       tokens: { input: 40, output: 4 },
+      costUsd: 0,
     };
     mockGetDagResumeSnapshot.mockResolvedValueOnce(expected);
     const store = createWorkflowStore();
@@ -284,6 +303,7 @@ describe('createWorkflowStore', () => {
       name: 'owner/repo',
       repository_url: 'https://github.com/owner/repo',
       default_cwd: '/workspace/repo',
+      kind: 'repo',
     });
     const store = createWorkflowStore();
     const result = await store.getCodebase('cb-1');
@@ -292,6 +312,7 @@ describe('createWorkflowStore', () => {
       name: 'owner/repo',
       repository_url: 'https://github.com/owner/repo',
       default_cwd: '/workspace/repo',
+      kind: 'repo',
     });
   });
 });
@@ -315,7 +336,10 @@ describe('createWorkflowDeps', () => {
   describe('provider credential fields', () => {
     beforeEach(() => {
       mockListDecryptedUserProviderCredentials.mockReset();
-      mockListDecryptedUserProviderCredentials.mockImplementation(async () => []);
+      mockListDecryptedUserProviderCredentials.mockImplementation(async () => ({
+        credentials: [],
+        issues: [],
+      }));
       mockIsPerUserProviderKeysEnabled.mockReset();
       mockIsPerUserProviderKeysEnabled.mockImplementation(() => false);
     });
@@ -330,7 +354,14 @@ describe('createWorkflowDeps', () => {
       mockListDecryptedUserProviderCredentials.mockRejectedValueOnce(new Error('db gone'));
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
-      expect(result).toEqual({ env: {}, files: [], protectedValues: [] });
+      expect(result).toEqual({
+        status: 'failed',
+        env: {},
+        files: [],
+        protectedValues: [],
+        credentials: [],
+        issues: [{ code: 'resolution_failed' }],
+      });
     });
 
     // Regression guard for #2035: enabling the credential vault (auto-key on by
@@ -339,45 +370,111 @@ describe('createWorkflowDeps', () => {
     // there is no scrub on the AI-provider path (unlike the GitHub org-token path).
     // A future change that scrubbed ambient provider keys would fail this.
     test('getUserProviderEnv is additive: unconnected user gets empty env (no ambient scrub)', async () => {
-      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([]);
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [],
+        issues: [],
+      });
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-unconnected', '/tmp/art');
-      expect(result).toEqual({ env: {}, files: [], protectedValues: [] });
+      expect(result).toEqual({
+        status: 'resolved',
+        env: {},
+        files: [],
+        protectedValues: [],
+        credentials: [],
+        issues: [],
+      });
     });
 
     test('getUserProviderEnv aggregates env from multiple providers', async () => {
-      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([
-        { provider: 'openrouter', cred: { kind: 'api_key', apiKey: 'or-k' } },
-        { provider: 'google', cred: { kind: 'api_key', apiKey: 'g-k' } },
-      ]);
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [
+          { provider: 'openrouter', cred: { kind: 'api_key', apiKey: 'or-k' } },
+          { provider: 'google', cred: { kind: 'api_key', apiKey: 'g-k' } },
+        ],
+        issues: [],
+      });
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
       expect(result?.env).toMatchObject({ OPENROUTER_API_KEY: 'or-k', GEMINI_API_KEY: 'g-k' });
       expect(result?.protectedValues).toEqual(['or-k', 'g-k']);
     });
 
-    test('getUserProviderEnv protects OAuth secrets without hiding public metadata', async () => {
-      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce([
-        {
-          provider: 'openai',
-          cred: {
-            kind: 'oauth',
-            oauthApiKey: 'derived-bearer',
-            rawCreds: {
-              type: 'oauth',
-              access: 'access-token',
-              refresh: 'refresh-token',
-              id_token: 'id-token',
-              accountId: 'account-id',
-              enterpriseUrl: 'company.ghe.com',
-              availableModelIds: ['claude-sonnet-4', 'gpt-5'],
-              expires: 123,
+    test('getUserProviderEnv canonicalizes provider provenance and issue vendors', async () => {
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [],
+        issues: [{ provider: 'codex', code: 'credential_unusable' }],
+      });
+      const deps = createWorkflowDeps();
+
+      const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+
+      expect(result?.credentials).toEqual([]);
+      expect(result?.issues).toEqual([{ vendor: 'openai', code: 'credential_unusable' }]);
+    });
+
+    test('getUserProviderEnv never marks an id_token-less OpenAI blob as subscription provenance', async () => {
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [
+          {
+            provider: 'openai',
+            cred: {
+              kind: 'oauth',
+              oauthApiKey: 'legacy-access',
+              rawCreds: {
+                access: 'legacy-access',
+                refresh: 'legacy-refresh',
+                expires: Date.now() + 60_000,
+                accountId: 'acct-legacy',
+              },
             },
           },
-        },
-      ]);
+        ],
+        issues: [],
+      });
+      const deps = createWorkflowDeps();
+
+      const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+
+      expect(result).toMatchObject({
+        status: 'resolved',
+        env: {},
+        files: [],
+        credentials: [],
+        issues: [{ vendor: 'openai', code: 'credential_unusable' }],
+      });
+    });
+
+    test('getUserProviderEnv protects OAuth secrets without hiding public metadata', async () => {
+      mockListDecryptedUserProviderCredentials.mockResolvedValueOnce({
+        credentials: [
+          {
+            provider: 'openai',
+            cred: {
+              kind: 'oauth',
+              oauthApiKey: 'derived-bearer',
+              rawCreds: {
+                type: 'oauth',
+                access: 'access-token',
+                refresh: 'refresh-token',
+                id_token: 'id-token',
+                accountId: 'account-id',
+                enterpriseUrl: 'company.ghe.com',
+                availableModelIds: ['claude-sonnet-4', 'gpt-5'],
+                expires: 123,
+              },
+            },
+          },
+        ],
+        issues: [],
+      });
       const deps = createWorkflowDeps();
       const result = await deps.getUserProviderEnv?.('u-1', '/tmp/art');
+      expect(result?.status).toBe('resolved');
+      expect(result?.credentials).toEqual([
+        { vendor: 'openai', kind: 'subscription', delivery: 'managed_file' },
+      ]);
+      expect(result?.issues).toEqual([]);
       expect(result?.protectedValues).toEqual([
         'derived-bearer',
         'access-token',
@@ -389,6 +486,8 @@ describe('createWorkflowDeps', () => {
       expect(result?.protectedValues).not.toContain('company.ghe.com');
       expect(result?.protectedValues).not.toContain('claude-sonnet-4');
       expect(result?.protectedValues).not.toContain('gpt-5');
+      expect(JSON.stringify(result?.credentials)).not.toContain('access-token');
+      expect(JSON.stringify(result?.issues)).not.toContain('/tmp/art');
     });
   });
 });

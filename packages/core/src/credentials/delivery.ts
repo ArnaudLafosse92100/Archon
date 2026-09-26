@@ -23,6 +23,7 @@
 import { dirname, join } from 'node:path';
 import { PI_PROVIDER_ENV_VARS, PI_AMBIENT_VENDORS } from '@archon/providers';
 import { CODEX_AUTH_JSON_RELATIVE_PATH, PI_AUTH_JSON_RELATIVE_PATH } from '@archon/workflows/deps';
+import { hasCompleteOpenAiOAuthCredentials } from './openai-oauth';
 
 /**
  * Pre-#1955 agent-keyed credential ids → vendor-canonical ids. Accepted at
@@ -106,20 +107,20 @@ export const KNOWN_VENDORS: ReadonlySet<string> = new Set<string>(
  * camelCase, and `id_token` is a REAL OpenID JWT captured at exchange/refresh
  * (the Codex CLI rejects an empty one with "invalid ID token format", which is
  * why this flow no longer goes through Pi — Pi drops the field). Legacy blobs
- * minted by Pi before the gate lift lack `id_token`; `str()` maps that to ''
- * and the run fails with the known Codex error — reconnecting the
- * subscription mints a complete blob.
+ * minted by Pi before the gate lift lack `id_token`; they are rejected before
+ * delivery so strict runs fail before entering the DAG and require reconnect.
  */
 function buildCodexAuthJson(rawCreds: OAuthCredentials): string {
-  const c = rawCreds as Record<string, unknown>;
-  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  if (!hasCompleteOpenAiOAuthCredentials(rawCreds)) {
+    throw new Error('Stored OpenAI subscription credential is incomplete; reconnect required.');
+  }
   return JSON.stringify({
     OPENAI_API_KEY: null,
     tokens: {
-      id_token: str(c.id_token),
-      access_token: str(c.access),
-      refresh_token: str(c.refresh),
-      account_id: str(c.accountId),
+      id_token: rawCreds.id_token,
+      access_token: rawCreds.access,
+      refresh_token: rawCreds.refresh,
+      account_id: rawCreds.accountId,
     },
     last_refresh: new Date().toISOString(),
   });

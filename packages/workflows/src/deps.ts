@@ -17,20 +17,75 @@ import type {
   NodeConfig,
   ProviderDefaultsMap,
   ProviderCapabilities,
+  ProviderLaunchAttestationV1,
 } from '@archon/providers/types';
+import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '@archon/providers/types';
 import type { RawAliasesConfig, RawTiersConfig } from './model-validation';
 import type {
   WorkflowRunConfigLayer,
   WorkflowRunConfigMetadata,
   WorkflowRunConfigSource,
 } from './schemas/run-config';
+import type { CodegraphManagedMode, ManagedResourcesGlobal } from './schemas/managed-resources';
 
 export const CODEX_AUTH_JSON_RELATIVE_PATH = 'codex-home/auth.json';
+export const CLAUDE_CONFIG_RELATIVE_PATH = 'claude-config';
 export const PI_AUTH_JSON_RELATIVE_PATH = 'pi-home/auth.json';
+export { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS };
 export const MANAGED_PROVIDER_CREDENTIAL_RELATIVE_PATHS = [
   CODEX_AUTH_JSON_RELATIVE_PATH,
   PI_AUTH_JSON_RELATIVE_PATH,
 ] as const;
+
+export type ProviderCredentialKind = 'api_key' | 'subscription';
+export type ProviderCredentialDelivery = 'environment' | 'managed_file';
+
+export interface ProviderCredentialProvenance {
+  vendor: string;
+  kind: ProviderCredentialKind;
+  delivery: ProviderCredentialDelivery;
+}
+
+export interface ProviderCredentialResolutionIssue {
+  vendor?: string;
+  code: 'credential_unusable' | 'delivery_failed' | 'resolution_failed';
+}
+
+export type StrictSubscriptionProvider = 'codex' | 'claude';
+
+/**
+ * Run-local secret delivery prepared before the DAG starts. This is deliberately
+ * kept out of run metadata and workflow events. The DAG derives a non-secret
+ * per-node attestation from it immediately before each provider invocation.
+ */
+export interface PreparedProviderLaunch {
+  provider: StrictSubscriptionProvider;
+  credential: ProviderCredentialProvenance & { kind: 'subscription' };
+  deliveryEnv: Record<string, string>;
+  neutralizedAliases: readonly string[];
+  deliveredAliases: readonly string[];
+  managedPathIdentity?: string;
+  envPolicy: 'targeted_empty_overrides';
+  filesystemSettingsPolicy?: 'disabled';
+}
+
+export type UserProviderEnvResolution =
+  | {
+      status: 'resolved';
+      env: Record<string, string>;
+      files: { path: string; contents: string }[];
+      protectedValues: string[];
+      credentials: ProviderCredentialProvenance[];
+      issues: ProviderCredentialResolutionIssue[];
+    }
+  | {
+      status: 'failed';
+      env: Record<string, never>;
+      files: [];
+      protectedValues: [];
+      credentials: [];
+      issues: ProviderCredentialResolutionIssue[];
+    };
 
 // Re-export provider types so existing workflow engine consumers don't break
 export type {
@@ -41,6 +96,7 @@ export type {
   NodeConfig,
   ProviderDefaultsMap,
   ProviderCapabilities,
+  ProviderLaunchAttestationV1,
 };
 
 // Backwards compat alias — deprecated, prefer direct import from @archon/providers/types
@@ -92,6 +148,21 @@ export interface WorkflowConfig {
   protectedEnvKeys?: readonly string[];
   /** Exact injected credential values, including credentials delivered through files. */
   protectedCredentialValues?: readonly string[];
+  /** Runtime-only strict subscription deliveries; never persisted in run metadata/events. */
+  preparedProviderLaunches?: Partial<Record<StrictSubscriptionProvider, PreparedProviderLaunch>>;
+  /** Operator-owned registry. It is never accepted from repo/workflow configuration. */
+  managedResources?: ManagedResourcesGlobal;
+  /** Run-owned capability selection; defaults to off and contains no executable input. */
+  managedResourceModes?: { codegraph: CodegraphManagedMode };
+  /** Runtime-only, attested CodeGraph MCP launch data. Never persisted. */
+  preparedCodegraph?: {
+    mode: Exclude<CodegraphManagedMode, 'off'>;
+    root: string;
+    command: string;
+    args: readonly string[];
+    env: Record<string, string>;
+    version: string;
+  };
   aliases?: RawAliasesConfig;
   tiers?: RawTiersConfig;
   commands: { folder?: string };
@@ -189,17 +260,11 @@ export interface WorkflowDeps {
    * map — the engine just merges `env` into `config.envVars` and writes the
    * `files` before any provider invocation.
    *
-   * Must never throw — return empty bags on any failure so the
-   * workflow continues with whatever env inheritance was already in place.
+   * Return a typed failure with non-secret issue codes when resolution fails.
+   * Runs without a credential policy preserve the legacy soft-fallback behavior;
+   * strict runs interpret missing or mismatched provenance as a pre-DAG failure.
    */
-  getUserProviderEnv?: (
-    userId: string,
-    artifactsDir: string
-  ) => Promise<{
-    env: Record<string, string>;
-    files: { path: string; contents: string }[];
-    protectedValues: string[];
-  }>;
+  getUserProviderEnv?: (userId: string, artifactsDir: string) => Promise<UserProviderEnvResolution>;
   /**
    * Optional: resolve the originating user's personal AI preferences (model
    * tiers, `@custom` aliases, default assistant) from the DB. Folded into

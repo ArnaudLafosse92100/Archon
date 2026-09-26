@@ -1,10 +1,10 @@
 import { mock, describe, test, expect, beforeEach } from 'bun:test';
-import { createQueryResult, mockPostgresDialect } from '../test/mocks/database';
+import { createMockQuery, mockPostgresDialect } from '../test/mocks/database';
 
 process.env.TOKEN_ENCRYPTION_KEY = 'a'.repeat(64);
 
 // persistProviderOAuth (called on success) writes through the store → mock the DB.
-const mockQuery = mock(() => Promise.resolve(createQueryResult([])));
+const mockQuery = createMockQuery();
 mock.module('../db/connection', () => ({
   pool: { query: mockQuery },
   getDialect: () => mockPostgresDialect,
@@ -71,6 +71,16 @@ mock.module('./openai-oauth', () => ({
     newCredentials: creds,
     apiKey: 'k',
   }),
+  hasCompleteOpenAiOAuthCredentials: (creds: Record<string, unknown>) =>
+    typeof creds.access === 'string' &&
+    creds.access.length > 0 &&
+    typeof creds.refresh === 'string' &&
+    creds.refresh.length > 0 &&
+    Number.isFinite(creds.expires) &&
+    typeof creds.accountId === 'string' &&
+    creds.accountId.length > 0 &&
+    typeof creds.id_token === 'string' &&
+    creds.id_token.length > 0,
   refreshOpenAiOAuthCredentials: async (creds: Record<string, unknown>) => creds,
 }));
 

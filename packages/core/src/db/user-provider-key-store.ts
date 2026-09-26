@@ -29,7 +29,11 @@ import {
   type ResolvedCredential,
 } from '../credentials/delivery';
 import { piOAuthProviderFor, OPENAI_SUBSCRIPTION_VENDOR } from '../credentials/oauth-providers';
-import { mintOpenAiOAuthApiKey, type OpenAiOAuthCredentials } from '../credentials/openai-oauth';
+import {
+  hasCompleteOpenAiOAuthCredentials,
+  mintOpenAiOAuthApiKey,
+  type OpenAiOAuthCredentials,
+} from '../credentials/openai-oauth';
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
@@ -247,6 +251,10 @@ async function resolveOAuthCredential(
     return null;
   }
   const rawCreds = result.newCredentials as OAuthCredentials;
+  if (vendor === OPENAI_SUBSCRIPTION_VENDOR && !hasCompleteOpenAiOAuthCredentials(rawCreds)) {
+    getLog().warn({ userId, provider }, 'user_provider_key.openai_oauth_incomplete');
+    return null;
+  }
   // Compare the meaningful fields (not JSON, which is key-order-sensitive → needless
   // writes on a reordered-but-equal blob).
   const rotated =
@@ -292,23 +300,34 @@ async function resolveOAuthCredential(
 export async function listDecryptedUserProviderCredentials(
   userId: string
 ): Promise<{ provider: string; cred: ResolvedCredential }[]> {
+  return (await listDecryptedUserProviderCredentialsWithIssues(userId)).credentials;
+}
+
+/** Workflow credential resolution variant that preserves non-secret failure provenance. */
+export async function listDecryptedUserProviderCredentialsWithIssues(userId: string): Promise<{
+  credentials: { provider: string; cred: ResolvedCredential }[];
+  issues: { provider?: string; code: 'credential_unusable' | 'resolution_failed' }[];
+}> {
   let rows: { provider: string; kind: 'api_key' | 'oauth'; label: string | null }[];
   try {
     rows = await listUserProviderKeys(userId);
   } catch (err) {
     getLog().warn({ err: err as Error, userId }, 'user_provider_key.list_decrypted_query_failed');
-    return [];
+    return { credentials: [], issues: [{ code: 'resolution_failed' }] };
   }
   const out: { provider: string; cred: ResolvedCredential }[] = [];
+  const issues: { provider?: string; code: 'credential_unusable' | 'resolution_failed' }[] = [];
   for (const r of rows) {
     try {
       const cred = await getDecryptedProviderCredential(userId, r.provider);
       if (cred) out.push({ provider: r.provider, cred });
+      else issues.push({ provider: r.provider, code: 'credential_unusable' });
     } catch (err) {
       getLog().warn(
         { err: err as Error, userId, provider: r.provider },
         'user_provider_key.list_decrypted_individual_failed'
       );
+      issues.push({ provider: r.provider, code: 'credential_unusable' });
     }
   }
   if (out.length < rows.length) {
@@ -333,5 +352,5 @@ export async function listDecryptedUserProviderCredentials(
       );
     }
   }
-  return out;
+  return { credentials: out, issues };
 }

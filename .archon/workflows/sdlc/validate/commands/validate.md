@@ -17,6 +17,16 @@ $ARGUMENTS
 3. Run what applies, in the project's own order where one is documented: type checks, lint, tests, build. Honor any documented aggregate gate (a `validate`/`check` script) over reassembling its pieces by hand.
 4. Capture each command and its outcome as you go.
 
+Run the project's applicable declared checks, including bounded AI integration
+tests when the project genuinely includes them. Do not recursively launch this
+validation workflow, its enclosing delivery workflow, or another command whose
+purpose is to re-enter the same validation/delivery orchestration. Inspect
+aggregate scripts and their delegates before execution; if an aggregate would
+re-enter this orchestration, run its separable project checks directly. If no
+applicable check can be separated, report the gate as unavailable, not healthy.
+Caller guidance and `scope` may exclude expensive project-specific stages, but
+never silently bypass a check that remains in the declared validation scope.
+
 ## The object under validation is the tracked tree
 
 An Archon run injects its own scaffolding into the checkout — the `.archon/` copy, and on some launch paths untracked workflow packages. That is run machinery, not the change under validation, and repository gates that inspect git state (untracked-file refusals, cleanliness checks) will trip on it. When a check fails **only** because of untracked files under `.archon/` that the run itself injected: quarantine them for the gate's duration (move them aside, run the gate, restore them — always restore, even on failure), note the quarantine in your report, and judge the gate's real result. Never quarantine tracked files, or anything the change under validation actually touches.
@@ -27,9 +37,22 @@ Do not modify source files, fix failures, commit, push, or touch pull requests. 
 
 ## Report
 
+The workflow records the resulting verdict, validation scope, and tracked-tree
+fingerprint together with the exact report in
+`$ARTIFACTS_DIR/validation-evidence.json`. Do not create or edit that file
+yourself. The tracked-tree fingerprint cannot observe an external database or
+service; callers that need such state bound to the verdict must supply a
+nonsecret validation-context identity. Secrets never belong in that identity.
+
 Write `$ARTIFACTS_DIR/validation.md`: each command run, its outcome, and for failures the decisive output tail — enough for a fixer to act without re-running everything. Concise and factual. No one is watching the run — this file and your declared fields are the only record the checks ever ran.
 
 ## Declare the verdict
+
+- `checks_performed`: true only when at least one ordinary project check actually
+  executed. Dependency installation, discovery and failed setup are not checks.
+  False for no defined checks or an unavailable gate. Preserve the existing
+  `green` distinction: no checks is true; an unavailable gate is false. A partly
+  executed gate is never green when applicable ordinary checks remain unrun.
 
 - `green` — true only when every applicable check you ran passed.
 - `red_cause` — why the checks are red, required whenever a check you ran failed. `introduced`: the change under validation caused it. `inherited`: the same check was already failing at the base this branch came from. `environment`: the machine caused it, not any code — a database or port a parallel process holds, a missing credential, a network fault. Always declared: use the empty string `""` when `green` is true, and when the gate could not run at all — an unrunnable gate is no evidence about the change, and delivery must stop there.

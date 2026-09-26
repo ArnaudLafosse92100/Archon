@@ -2,7 +2,7 @@
  * Database operations for workflow runs
  */
 import { pool, getDialect, getDatabaseType, getDatabase } from './connection';
-import { insertWorkflowEvent } from './workflow-events';
+import { insertWorkflowEvent, listActiveWorkflowNodeIds } from './workflow-events';
 import { toHydratedTimestamp } from './timestamps';
 import type { IDatabase, SqlDialect } from './adapters/types';
 import type {
@@ -10,6 +10,7 @@ import type {
   WorkflowRunOutcome,
   WorkflowRunStatus,
   ApprovalContext,
+  WorkflowAttentionWaitContext,
   WorkflowWaitContext,
   ScheduledWorkflowResume,
 } from '@archon/workflows/schemas/workflow-run';
@@ -114,18 +115,22 @@ function rowLockClause(): string {
   return getDatabaseType() === 'postgresql' ? ' FOR UPDATE' : '';
 }
 
-function normalizeMetadata(raw: unknown): Record<string, unknown> {
-  let metadata = raw;
-  if (typeof metadata === 'string') {
+function parseJsonObject(raw: unknown): Record<string, unknown> | null {
+  let value = raw;
+  if (typeof value === 'string') {
     try {
-      metadata = JSON.parse(metadata) as unknown;
+      value = JSON.parse(value) as unknown;
     } catch {
-      return {};
+      return null;
     }
   }
-  return typeof metadata === 'object' && metadata !== null
-    ? (metadata as Record<string, unknown>)
-    : {};
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function normalizeMetadata(raw: unknown): Record<string, unknown> {
+  return parseJsonObject(raw) ?? {};
 }
 
 /**
@@ -935,6 +940,7 @@ export async function resumeWorkflowRun(
           cursor.kind === 'wait'
             ? prior?.status === 'paused' &&
               isWorkflowWaitContext(priorMetadata.wait) &&
+              priorMetadata.wait.kind !== 'attention' &&
               priorMetadata.wait.nodeId === cursor.nodeId &&
               priorMetadata.wait.resumeAt === cursor.resumeAt
             : prior?.status === 'failed' &&
@@ -1434,7 +1440,7 @@ export async function pauseWorkflowRun(
   }
 }
 
-/** Pause a running run on a persisted time/event condition. */
+/** Pause a running run on a persisted wait condition. */
 export async function pauseWorkflowRunForWait(
   id: string,
   waitContext: WorkflowWaitContext,
@@ -1459,7 +1465,9 @@ export async function pauseWorkflowRunForWait(
           step_name: pause.stepName,
           data: {
             kind: parsedWaitContext.kind,
-            resume_at: parsedWaitContext.resumeAt,
+            ...(parsedWaitContext.kind !== 'attention'
+              ? { resume_at: parsedWaitContext.resumeAt }
+              : {}),
             ...(parsedWaitContext.kind === 'event' ? { event: parsedWaitContext.event } : {}),
           },
         });
@@ -1473,6 +1481,68 @@ export async function pauseWorkflowRunForWait(
   }
 }
 
+/** Fail the exact attention cursor whose required notification could not be delivered. */
+export async function failPausedAttentionWait(
+  id: string,
+  waitContext: WorkflowAttentionWaitContext,
+  error: string
+): Promise<{ failed: boolean }> {
+  const parsedWaitContext = workflowWaitContextSchema.parse(waitContext);
+  if (parsedWaitContext.kind !== 'attention') {
+    throw new Error('Only an action-required wait can fail through notification delivery');
+  }
+  const dialect = getDialect();
+  const postgres = getDatabaseType() === 'postgresql';
+  const waitField = (field: string): string =>
+    postgres ? `metadata->'wait'->>'${field}'` : `json_extract(metadata, '$.wait.${field}')`;
+  const params: unknown[] = [
+    id,
+    JSON.stringify({ error }),
+    parsedWaitContext.nodeId,
+    parsedWaitContext.waitingSince,
+  ];
+  const ownerClauses = [`${waitField('owner')} = '${parsedWaitContext.owner}'`];
+  if (parsedWaitContext.owner === 'loop_group') {
+    params.push(parsedWaitContext.bodyWaitId, parsedWaitContext.iteration);
+    const iterationField = postgres
+      ? "(metadata->'wait'->>'iteration')::integer"
+      : "json_extract(metadata, '$.wait.iteration')";
+    ownerClauses.push(`${waitField('bodyWaitId')} = $5`, `${iterationField} = $6`);
+  }
+  const metadataWithoutScheduledResume = postgres
+    ? "metadata - 'scheduled_resume'"
+    : "json_remove(metadata, '$.scheduled_resume')";
+
+  try {
+    return await getDatabase().withTransaction(async query => {
+      const result = await query(
+        `UPDATE remote_agent_workflow_runs
+         SET status = 'failed', completed_at = ${dialect.now()}, metadata = ${dialect.jsonMerge(metadataWithoutScheduledResume, 2)}
+         WHERE id = $1
+           AND status = 'paused'
+           AND ${waitField('kind')} = 'attention'
+           AND ${waitField('nodeId')} = $3
+           AND ${waitField('waitingSince')} = $4
+           AND ${ownerClauses.join('\n           AND ')}`,
+        params
+      );
+      const failed = (result.rowCount ?? 0) > 0;
+      if (failed) {
+        await insertWorkflowEvent(query, {
+          workflow_run_id: id,
+          event_type: 'workflow_failed',
+          data: { error },
+        });
+      }
+      return { failed };
+    });
+  } catch (dbError) {
+    const err = dbError as Error;
+    getLog().error({ err, workflowRunId: id }, 'db.workflow_attention_notification_fail_error');
+    throw new Error(`Failed to fail paused attention wait: ${err.message}`);
+  }
+}
+
 /** Atomically consume one exact wait cursor and persist its completed node snapshot. */
 export async function clearWorkflowWaitContext(
   id: string,
@@ -1483,10 +1553,11 @@ export async function clearWorkflowWaitContext(
     getDatabaseType() === 'postgresql'
       ? "metadata->'wait'->>'nodeId'"
       : "json_extract(metadata, '$.wait.nodeId')";
-  const resumeAtExpr =
+  const cursorExpr =
     getDatabaseType() === 'postgresql'
-      ? "metadata->'wait'->>'resumeAt'"
-      : "json_extract(metadata, '$.wait.resumeAt')";
+      ? `metadata->'wait'->>'${waitContext.kind === 'attention' ? 'waitingSince' : 'resumeAt'}'`
+      : `json_extract(metadata, '$.wait.${waitContext.kind === 'attention' ? 'waitingSince' : 'resumeAt'}')`;
+  const cursor = waitContext.kind === 'attention' ? waitContext.waitingSince : waitContext.resumeAt;
   const clearWait =
     getDatabaseType() === 'postgresql' ? "metadata - 'wait'" : "json_remove(metadata, '$.wait')";
   try {
@@ -1494,8 +1565,8 @@ export async function clearWorkflowWaitContext(
       const result = await query(
         `UPDATE remote_agent_workflow_runs
          SET metadata = ${clearWait}
-         WHERE id = $1 AND status = 'running' AND ${nodeExpr} = $2 AND ${resumeAtExpr} = $3`,
-        [id, waitContext.nodeId, waitContext.resumeAt]
+         WHERE id = $1 AND status = 'running' AND ${nodeExpr} = $2 AND ${cursorExpr} = $3`,
+        [id, waitContext.nodeId, cursor]
       );
       if ((result.rowCount ?? 0) === 0) return { cleared: false };
       await insertWorkflowEvent(query, {
@@ -1509,6 +1580,7 @@ export async function clearWorkflowWaitContext(
         event_type: 'node_completed',
         step_name: completion.stepName,
         data: {
+          ...completion.lifecycleData,
           type: 'wait',
           duration_ms: completion.result.waited_ms,
           node_output: JSON.stringify(completion.result),
@@ -1537,6 +1609,10 @@ export async function listDueWorkflowContinuations(
     getDatabaseType() === 'postgresql'
       ? "metadata->'wait'->>'signaledAt'"
       : "json_extract(metadata, '$.wait.signaledAt')";
+  const waitKind =
+    getDatabaseType() === 'postgresql'
+      ? "metadata->'wait'->>'kind'"
+      : "json_extract(metadata, '$.wait.kind')";
   const scheduledResumeAt =
     getDatabaseType() === 'postgresql'
       ? "metadata->'scheduled_resume'->>'resumeAt'"
@@ -1553,7 +1629,8 @@ export async function listDueWorkflowContinuations(
     const result = await pool.query<WorkflowRun>(
       `SELECT * FROM remote_agent_workflow_runs
        WHERE (${retryAt} IS NULL OR ${retryAt} <= $1)
-         AND ((status = 'paused' AND (${signaledAt} IS NOT NULL OR ${resumeAt} <= $1))
+         AND ((status = 'paused' AND ${waitKind} IN ('time', 'event')
+               AND (${signaledAt} IS NOT NULL OR ${resumeAt} <= $1))
           OR (status = 'failed' AND ${scheduledResumeAt} <= $1 AND ${scheduledTriggeredAt} IS NULL))
        ORDER BY COALESCE(${retryAt}, ${resumeAt}, ${scheduledResumeAt}) ASC
        LIMIT $2`,
@@ -1564,6 +1641,90 @@ export async function listDueWorkflowContinuations(
     const err = error as Error;
     getLog().error({ err }, 'db.workflow_continuation_due_list_failed');
     throw new Error(`Failed to list due workflow continuations: ${err.message}`);
+  }
+}
+
+export interface WorkflowEventSignalCandidate {
+  runId: string;
+  wait: Extract<WorkflowWaitContext, { kind: 'event' }>;
+  outputType: string;
+  structuredOutput: unknown;
+}
+
+export async function listWorkflowEventSignalCandidates(
+  event: string,
+  now: Date
+): Promise<WorkflowEventSignalCandidate[]> {
+  const postgres = getDatabaseType() === 'postgresql';
+  const runJson = (path: string): string =>
+    postgres
+      ? `r.metadata->'wait'->>'${path}'`
+      : `CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.wait.${path}') END`;
+  const eventJson = (path: string): string =>
+    postgres
+      ? `e.data->>'${path}'`
+      : `CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.${path}') END`;
+  const structuredOutputType = postgres
+    ? "CASE WHEN e.data ? 'structured_output' THEN jsonb_typeof(e.data->'structured_output') END"
+    : "CASE WHEN json_valid(e.data) THEN json_type(e.data, '$.structured_output') END";
+
+  interface CandidateRow {
+    run_id: string;
+    run_metadata: unknown;
+    event_data: unknown;
+  }
+
+  try {
+    const result = await pool.query<CandidateRow>(
+      `SELECT r.id AS run_id, r.metadata AS run_metadata, e.data AS event_data
+       FROM remote_agent_workflow_runs r
+       JOIN remote_agent_workflow_events e ON e.workflow_run_id = r.id
+       WHERE r.status = 'paused'
+         AND ${runJson('kind')} = 'event'
+         AND ${runJson('event')} = $1
+         AND ${runJson('signaledAt')} IS NULL
+         AND ${runJson('resumeAt')} > $2
+         AND e.event_type = 'node_completed'
+         AND ${eventJson('output_type')} IS NOT NULL
+         AND ${eventJson('output_type')} <> ''
+         AND ${structuredOutputType} IS NOT NULL
+         AND ${structuredOutputType} <> 'null'`,
+      [event, now.toISOString()]
+    );
+
+    const candidates: WorkflowEventSignalCandidate[] = [];
+    for (const row of result.rows) {
+      const metadata = parseJsonObject(row.run_metadata);
+      const eventData = parseJsonObject(row.event_data);
+      if (!metadata || !eventData) continue;
+
+      const parsedWait = workflowWaitContextSchema.safeParse(metadata.wait);
+      const outputType = eventData.output_type;
+      if (
+        !parsedWait.success ||
+        parsedWait.data.kind !== 'event' ||
+        parsedWait.data.event !== event ||
+        parsedWait.data.signaledAt !== undefined ||
+        Date.parse(parsedWait.data.resumeAt) <= now.getTime() ||
+        typeof outputType !== 'string' ||
+        outputType === '' ||
+        !Object.hasOwn(eventData, 'structured_output')
+      ) {
+        continue;
+      }
+
+      candidates.push({
+        runId: row.run_id,
+        wait: parsedWait.data,
+        outputType,
+        structuredOutput: eventData.structured_output,
+      });
+    }
+    return candidates;
+  } catch (error) {
+    const err = error as Error;
+    getLog().error({ err, event }, 'db.workflow_event_signal_candidates_list_failed');
+    throw new Error(`Failed to list workflow event signal candidates: ${err.message}`);
   }
 }
 
@@ -1755,6 +1916,12 @@ export type {
   DashboardRunsResult,
 } from '../schemas/workflow-run';
 
+function dashboardStatuses(
+  status: NonNullable<ListDashboardRunsOptions['status']>
+): WorkflowRunStatus[] {
+  return [...new Set(Array.isArray(status) ? status : [status])];
+}
+
 /**
  * Build WHERE clauses shared between the list and count queries.
  * Returns the clauses array and values array (mutated in place).
@@ -1766,8 +1933,11 @@ function buildDashboardWhereClauses(
   const whereClauses: string[] = [];
 
   if (options?.status) {
-    values.push(options.status);
-    whereClauses.push(`r.status = $${String(values.length)}`);
+    const placeholders = dashboardStatuses(options.status).map(status => {
+      values.push(status);
+      return `$${String(values.length)}`;
+    });
+    whereClauses.push(`r.status IN (${placeholders.join(', ')})`);
   }
   if (options?.codebaseId) {
     values.push(options.codebaseId);
@@ -1835,30 +2005,17 @@ export async function listDashboardRuns(
 
   try {
     const [listResult, countResult] = await Promise.all([
-      pool.query<DashboardWorkflowRun>(
+      pool.query<
+        Omit<
+          DashboardWorkflowRun,
+          'active_nodes' | 'current_step_name' | 'current_step_status' | 'total_steps'
+        >
+      >(
         `SELECT r.*,
                 c.platform_type,
                 c.platform_conversation_id AS worker_platform_id,
                 pc.platform_conversation_id AS parent_platform_id,
                 cb.name AS codebase_name,
-                (SELECT e.step_name
-                 FROM remote_agent_workflow_events e
-                 WHERE e.workflow_run_id = r.id AND e.event_type = 'step_started'
-                 ORDER BY e.created_at DESC LIMIT 1) AS current_step_name,
-                (SELECT ${jsonIntExtract('e.data', 'total_steps')}
-                 FROM remote_agent_workflow_events e
-                 WHERE e.workflow_run_id = r.id AND e.event_type = 'step_started'
-                 ORDER BY e.created_at DESC LIMIT 1) AS total_steps,
-                CASE (SELECT e2.event_type
-                      FROM remote_agent_workflow_events e2
-                      WHERE e2.workflow_run_id = r.id
-                        AND e2.event_type IN ('step_completed','step_failed','step_started')
-                      ORDER BY e2.created_at DESC LIMIT 1)
-                  WHEN 'step_completed' THEN 'completed'
-                  WHEN 'step_failed' THEN 'failed'
-                  WHEN 'step_started' THEN 'running'
-                  ELSE NULL
-                END AS current_step_status,
                 (SELECT COUNT(*) FROM remote_agent_workflow_events e
                  WHERE e.workflow_run_id = r.id AND e.event_type = 'parallel_agent_completed') AS agents_completed,
                 (SELECT COUNT(*) FROM remote_agent_workflow_events e
@@ -1904,10 +2061,23 @@ export async function listDashboardRuns(
 
     // Total for the current filter (with status applied)
     const total = options?.status
-      ? (counts[options.status as keyof typeof counts] ?? 0)
+      ? dashboardStatuses(options.status).reduce((sum, status) => sum + counts[status], 0)
       : counts.all;
 
-    return { runs: listResult.rows.map(normalizeWorkflowRun), total, counts };
+    const activeByRun = await listActiveWorkflowNodeIds(listResult.rows.map(run => run.id));
+    const runs = listResult.rows.map(run => {
+      const activeNodes = activeByRun.get(run.id) ?? [];
+      const hasSingleActiveNode = activeNodes.length === 1;
+      return normalizeWorkflowRun({
+        ...run,
+        active_nodes: activeNodes,
+        current_step_name: hasSingleActiveNode ? (activeNodes[0] ?? null) : null,
+        current_step_status: hasSingleActiveNode ? ('running' as const) : null,
+        total_steps: null,
+      });
+    });
+
+    return { runs, total, counts };
   } catch (error) {
     const err = error as Error;
     getLog().error({ err }, 'list_dashboard_runs_failed');
@@ -1951,9 +2121,7 @@ export async function listWorkflowRuns(options?: {
   }
   if (options?.codebaseId) {
     values.push(options.codebaseId);
-    whereClauses.push(
-      `conversation_id IN (SELECT id FROM remote_agent_conversations WHERE codebase_id = $${String(values.length)})`
-    );
+    whereClauses.push(`remote_agent_workflow_runs.codebase_id = $${String(values.length)}`);
   }
 
   const limit = options?.limit ?? 50;

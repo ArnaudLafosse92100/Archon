@@ -13,6 +13,7 @@
 import { describe, test, expect, mock } from 'bun:test';
 import type { TokenUsage } from '@archon/providers/types';
 import { isWorkflowWaitContext } from '@archon/workflows/schemas/workflow-run';
+import type { GateResolutionEvent } from './workflows';
 
 mock.module('@archon/paths', () => ({
   createLogger: () => ({
@@ -47,9 +48,11 @@ const {
   cancelFanOutRun,
   pauseWorkflowRun,
   pauseWorkflowRunForWait,
+  failPausedAttentionWait,
   clearWorkflowWaitContext,
   signalWorkflowWait,
   listDueWorkflowContinuations,
+  listWorkflowEventSignalCandidates,
   deferWorkflowContinuation,
   getWorkflowRun,
   findResumableRun,
@@ -613,11 +616,7 @@ describe('gate reject staging — real SQLite end-to-end (#2075)', () => {
 // ---------------------------------------------------------------------------
 
 /** A minimal audit event for the gate CAS calls (content is not asserted here). */
-function approvalEvent(decision: 'approved' | 'rejected'): {
-  event_type: string;
-  step_name: string;
-  data: Record<string, unknown>;
-} {
+function approvalEvent(decision: 'approved' | 'rejected'): GateResolutionEvent {
   return { event_type: 'approval_received', step_name: 'review', data: { decision } };
 }
 
@@ -821,6 +820,142 @@ describe('durable wait continuation races — real SQLite', () => {
     resumeAt: '2099-08-25T10:00:00.000Z',
   };
 
+  test('finds typed outputs only for exact open waits and signals with their cursor', async () => {
+    const pullRequest = {
+      repo: { host: 'github.com', path: 'example/repo' },
+      number: 42,
+    };
+    await seed('event-candidate', 'paused', "datetime('now')", { wait: waitA });
+    await seed('other-event-candidate', 'paused', "datetime('now')", {
+      wait: { ...waitA, event: 'deploy.complete' },
+    });
+    await seed('expired-event-candidate', 'paused', "datetime('now')", {
+      wait: { ...waitA, resumeAt: '2026-08-24T09:00:00.000Z' },
+    });
+
+    for (const [runId, outputType, structuredOutput] of [
+      ['event-candidate', 'pull-request', pullRequest],
+      ['event-candidate', 'plan', { summary: 'not a PR identity' }],
+      ['other-event-candidate', 'pull-request', pullRequest],
+      ['expired-event-candidate', 'pull-request', pullRequest],
+    ] as const) {
+      await db.query(
+        `INSERT INTO remote_agent_workflow_events
+           (workflow_run_id, event_type, step_name, data)
+         VALUES ($1, 'node_completed', 'producer', $2)`,
+        [runId, JSON.stringify({ output_type: outputType, structured_output: structuredOutput })]
+      );
+    }
+
+    const candidates = await listWorkflowEventSignalCandidates(
+      'checks.complete',
+      new Date('2026-08-24T10:00:00.000Z')
+    );
+    expect(
+      candidates
+        .map(candidate => ({ runId: candidate.runId, outputType: candidate.outputType }))
+        .sort((left, right) => left.outputType.localeCompare(right.outputType))
+    ).toEqual([
+      { runId: 'event-candidate', outputType: 'plan' },
+      { runId: 'event-candidate', outputType: 'pull-request' },
+    ]);
+
+    const candidate = candidates.find(item => item.outputType === 'pull-request');
+    if (!candidate) throw new Error('Expected the pull-request signal candidate');
+    expect(candidate.wait).toEqual(waitA);
+    await expect(
+      signalWorkflowWait(candidate.runId, candidate.wait, { conclusion: 'success' })
+    ).resolves.toEqual({ signaled: true });
+
+    const signaled = await getWorkflowRun('event-candidate');
+    expect(signaled?.metadata.wait).toMatchObject({
+      ...waitA,
+      payload: { conclusion: 'success' },
+    });
+  });
+
+  test('never schedules an action-required wait and consumes it only after explicit resume', async () => {
+    const attentionA = {
+      owner: 'node' as const,
+      nodeId: 'rerun-ci',
+      kind: 'attention' as const,
+      waitingSince: '2026-08-24T10:00:00.000Z',
+      message: 'Re-run the failing check, then resume.',
+    };
+    await seed('attention-explicit-resume', 'paused', "datetime('now')", { wait: attentionA });
+
+    const due = await listDueWorkflowContinuations(new Date('2099-08-24T10:00:00.000Z'), 25);
+    expect(due.map(run => run.id)).not.toContain('attention-explicit-resume');
+
+    await expect(resumeWorkflowRun('attention-explicit-resume')).resolves.toMatchObject({
+      id: 'attention-explicit-resume',
+      status: 'running',
+    });
+    await expect(
+      clearWorkflowWaitContext('attention-explicit-resume', attentionA, {
+        stepName: 'rerun-ci',
+        result: { status: 'satisfied', waited_ms: 1000 },
+        lifecycleData: { node_id: 'wait-attempt-1', authored_node_id: 'rerun-ci', ai_node: false },
+      })
+    ).resolves.toEqual({ cleared: true });
+
+    const attentionB = {
+      ...attentionA,
+      waitingSince: '2026-08-24T10:01:00.000Z',
+      message: 'The check is still red. Re-run it, then resume.',
+    };
+    await pauseWorkflowRunForWait('attention-explicit-resume', attentionB, {
+      kind: 'started',
+      stepName: 'rerun-ci',
+    });
+    await resumeWorkflowRun('attention-explicit-resume');
+    await expect(
+      clearWorkflowWaitContext('attention-explicit-resume', attentionA, {
+        stepName: 'rerun-ci',
+        result: { status: 'satisfied', waited_ms: 1000 },
+        lifecycleData: { node_id: 'wait-attempt-2', authored_node_id: 'rerun-ci', ai_node: false },
+      })
+    ).resolves.toEqual({ cleared: false });
+    expect((await getWorkflowRun('attention-explicit-resume'))?.metadata.wait).toEqual(attentionB);
+  });
+
+  test('makes an undeliverable action-required pause visibly failed', async () => {
+    const attention = {
+      owner: 'node' as const,
+      nodeId: 'rerun-ci',
+      kind: 'attention' as const,
+      waitingSince: '2026-08-24T11:00:00.000Z',
+      message: 'Re-run the failing check, then resume.',
+    };
+    await seed('attention-notification-failed', 'paused', "datetime('now')", { wait: attention });
+
+    await expect(
+      failPausedAttentionWait(
+        'attention-notification-failed',
+        attention,
+        'action-required notification was not delivered'
+      )
+    ).resolves.toEqual({ failed: true });
+
+    const failed = await getWorkflowRun('attention-notification-failed');
+    expect(failed?.status).toBe('failed');
+    expect(failed?.completed_at).not.toBeNull();
+    expect(failed?.metadata).toMatchObject({
+      wait: attention,
+      error: 'action-required notification was not delivered',
+    });
+    expect(await countEvents('attention-notification-failed', 'workflow_failed')).toBe(1);
+
+    await expect(
+      failPausedAttentionWait(
+        'attention-notification-failed',
+        attention,
+        'duplicate notification failure'
+      )
+    ).resolves.toEqual({ failed: false });
+    expect(await countEvents('attention-notification-failed', 'workflow_failed')).toBe(1);
+  });
+
   test('rejects a stale signal after the same event advances to a later occurrence', async () => {
     await seed('wait-signal-cursor', 'paused', "datetime('now')", { wait: waitA });
     await resumeWorkflowRun('wait-signal-cursor', {
@@ -831,6 +966,11 @@ describe('durable wait continuation races — real SQLite', () => {
     await clearWorkflowWaitContext('wait-signal-cursor', waitA, {
       stepName: 'release-loop.await-checks',
       result: { status: 'satisfied', waited_ms: 1, event: waitA.event },
+      lifecycleData: {
+        node_id: 'wait-attempt-3',
+        authored_node_id: 'await-checks',
+        ai_node: false,
+      },
     });
 
     const waitB = {
@@ -865,7 +1005,11 @@ describe('durable wait continuation races — real SQLite', () => {
 
     const due = await listDueWorkflowContinuations(new Date('2026-08-24T10:02:00.000Z'), 25);
     const dueRun = due.find(run => run.id === 'wait-three-way-race');
-    if (!dueRun || !isWorkflowWaitContext(dueRun.metadata.wait)) {
+    if (
+      !dueRun ||
+      !isWorkflowWaitContext(dueRun.metadata.wait) ||
+      dueRun.metadata.wait.kind === 'attention'
+    ) {
       throw new Error('Expected the signaled wait to be selected as a due continuation');
     }
     const cursor = {
@@ -897,6 +1041,11 @@ describe('durable wait continuation races — real SQLite', () => {
         waited_ms: 120_000,
         event: waitA.event,
         payload: { conclusion: 'success' },
+      },
+      lifecycleData: {
+        node_id: 'wait-attempt-4',
+        authored_node_id: 'await-checks',
+        ai_node: false,
       },
     });
     const consumed = await getWorkflowRun('wait-three-way-race');
@@ -1048,11 +1197,13 @@ describe('resolveApprovalGate — CAS at the DB layer (#2113)', () => {
       resolved: null,
     });
 
-    const badEvent = {
-      // Simulates an event-write failure inside the transaction.
-      event_type: null as unknown as string,
+    const circularData: Record<string, unknown> = {};
+    circularData.self = circularData;
+    const badEvent: GateResolutionEvent = {
+      // JSON serialization fails inside the event write transaction.
+      event_type: 'approval_received',
       step_name: 'review',
-      data: { decision: 'approved' },
+      data: circularData,
     };
     await expect(
       resolveApprovalGate(

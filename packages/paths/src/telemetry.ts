@@ -590,8 +590,8 @@ export type WorkflowExitReason =
   | 'no_nodes_completed'
   | 'node_error'
   | 'unhandled_error'
-  // Evidence gate (#2230): all nodes succeeded but `evidence_policy.required`
-  // found no `$ARTIFACTS_DIR/evidence.json`, so the run was marked failed.
+  // File-presence gate (#2230): all nodes succeeded but `evidence_policy.required`
+  // found no conventional `$ARTIFACTS_DIR/evidence.json` marker, so the run failed.
   | 'evidence_missing';
 
 /**
@@ -600,7 +600,8 @@ export type WorkflowExitReason =
  * `transient` = timeout/network/rate-limit, `unknown` = everything else.
  * A fixed enum — raw error text never leaves the machine.
  */
-export type WorkflowErrorClass = 'fatal' | 'transient' | 'unknown';
+export const WORKFLOW_ERROR_CLASSES = ['fatal', 'transient', 'unknown'] as const;
+export type WorkflowErrorClass = (typeof WORKFLOW_ERROR_CLASSES)[number];
 
 /** Closed set of DAG node types, mirrored from `@archon/workflows` schemas. */
 export type WorkflowNodeType =

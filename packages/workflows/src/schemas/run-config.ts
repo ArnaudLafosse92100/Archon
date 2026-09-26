@@ -1,8 +1,34 @@
 import { z } from '@hono/zod-openapi';
-import { MAX_DURABLE_WAIT_MS } from './dag-node';
+import { MAX_DURABLE_WAIT_MS } from './durable-wait';
 import { runAliasesConfigSchema, runTiersConfigSchema } from './model-binding';
+import { managedResourcesRunSchema } from './managed-resources';
 
 const providerDefaultsSchema = z.record(z.string(), z.unknown());
+
+export const workflowCredentialPolicySchema = z
+  .object({
+    providers: z
+      .object({
+        codex: z
+          .object({
+            requiredKind: z.literal('subscription'),
+          })
+          .strict()
+          .optional(),
+        claude: z
+          .object({
+            requiredKind: z.literal('subscription'),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict(),
+  })
+  .strict()
+  .refine(policy => Object.values(policy.providers).some(Boolean), {
+    message: 'At least one provider credential policy is required',
+    path: ['providers'],
+  });
 
 export const workflowRunContinuationConfigSchema = z
   .object({
@@ -23,6 +49,8 @@ export const workflowRunConfigLayerSchema = z
     workflows: workflowRunContinuationConfigSchema.optional(),
     docsPath: z.string().trim().min(1).optional(),
     envVars: z.record(z.string(), z.string()).optional(),
+    credentialPolicy: workflowCredentialPolicySchema.optional(),
+    managedResources: managedResourcesRunSchema.optional(),
   })
   .strict();
 

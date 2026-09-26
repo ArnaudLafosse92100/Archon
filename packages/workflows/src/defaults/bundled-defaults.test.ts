@@ -25,6 +25,7 @@ import {
 } from '../packaged-workflow';
 import { parseWorkflow } from '../loader';
 import { dryRunWorkflow } from '../dry-run';
+import { resolveWorkflow } from '../graph-plan';
 import { makeTestWorkflow } from '../test-utils';
 
 // Resolve the on-disk defaults directories relative to this test file so the
@@ -299,6 +300,83 @@ describe('bundled-defaults', () => {
       expect(content).not.toContain('sed -i "s/SPRINT_COUNT_PLACEHOLDER/$SPRINT_COUNT/"');
     });
 
+    it('archon-ship carries its target through triage.md without downstream target prose', () => {
+      const content = BUNDLED_WORKFLOWS['archon-ship'];
+      const parsed = parseWorkflow(content, 'archon-ship.yaml');
+      if (parsed.workflow === null) throw new Error(parsed.error.error);
+
+      expect(parsed.workflow.inputs?.target?.default).toBe('');
+
+      const triage = parsed.workflow.nodes.find(node => node.id === 'triage');
+      expect(triage?.kind).toBe('include');
+      if (triage?.kind !== 'include') throw new Error('triage is not an include');
+      expect(triage.with).toEqual({
+        target: '$INPUTS.target',
+        publish: '$INPUTS.publish',
+        state_labels: '$INPUTS.state_labels',
+      });
+
+      const triageCommand = BUNDLED_COMMANDS['__archon_pack__bundled:sdlc:triage::triage'];
+      expect(triageCommand).toContain('Write `$ARTIFACTS_DIR/triage.md`');
+      expect(triageCommand).toContain('**Source and outcome** - what was requested');
+
+      const downstreamBindings = [
+        { id: 'inv', input: 'target' },
+        { id: 'planned', input: 'work' },
+        { id: 'deliver', input: 'work' },
+      ] as const;
+      for (const { id, input } of downstreamBindings) {
+        const node = parsed.workflow.nodes.find(node => node.id === id);
+        expect(node?.kind).toBe('include');
+        if (node?.kind !== 'include') throw new Error(`${id} is not an include`);
+        const binding = node.with?.[input];
+        expect(binding).toBeString();
+        expect(binding).toContain('$ARTIFACTS_DIR/triage.md');
+        expect(binding).not.toContain('$INPUTS.target');
+        expect(binding).not.toContain('Original work item:');
+      }
+
+      expect(content).not.toContain('Original work item:');
+    });
+
+    it('propagates caller-owned state labels and hold publication through lifecycle composition', () => {
+      const lifecycle = parseWorkflow(
+        BUNDLED_WORKFLOWS['archon-lifecycle'],
+        'archon-lifecycle.yaml'
+      );
+      if (lifecycle.workflow === null) throw new Error(lifecycle.error.error);
+      expect(lifecycle.workflow.inputs?.state_labels?.default).toBe('{}');
+      expect(lifecycle.workflow.inputs?.publish_holds?.default).toBe('false');
+
+      const intake = lifecycle.workflow.nodes.find(node => node.id === 'intake');
+      expect(intake?.kind).toBe('exec');
+      if (intake?.kind !== 'exec') throw new Error('intake is not an exec node');
+      expect(intake?.with).toMatchObject({ state_labels: '$INPUTS.state_labels' });
+      const ship = lifecycle.workflow.nodes.find(node => node.id === 'ship');
+      expect(ship?.kind).toBe('include');
+      if (ship?.kind !== 'include') throw new Error('ship is not an include');
+      expect(ship?.with).toMatchObject({ state_labels: '$INPUTS.state_labels' });
+      const merge = lifecycle.workflow.nodes.find(node => node.id === 'merge');
+      expect(merge?.kind).toBe('include');
+      if (merge?.kind !== 'include') throw new Error('merge is not an include');
+      expect(merge?.with).toMatchObject({ publish_holds: '$INPUTS.publish_holds' });
+
+      const mergeQueue = parseWorkflow(
+        BUNDLED_WORKFLOWS['archon-merge-queue'],
+        'archon-merge-queue.yaml'
+      );
+      if (mergeQueue.workflow === null) throw new Error(mergeQueue.error.error);
+      const assessment = mergeQueue.workflow.nodes.find(node => node.id === 'assess');
+      expect(assessment?.kind).toBe('agent');
+      if (assessment?.kind !== 'agent' || assessment.source.kind !== 'command') {
+        throw new Error('assessment is not a command agent');
+      }
+      expect(assessment.source.with).toMatchObject({
+        mode: '$INPUTS.mode',
+        publish_holds: '$INPUTS.publish_holds',
+      });
+    });
+
     it('archon-deliver preserves the conditional-lens bindings', () => {
       const parsed = parseWorkflow(BUNDLED_WORKFLOWS['archon-deliver'], 'archon-deliver.yaml');
       if (parsed.workflow === null) throw new Error(parsed.error.error);
@@ -326,6 +404,42 @@ describe('bundled-defaults', () => {
       // beside a head branch nothing downstream reads (#2968).
       expect(review.with).not.toHaveProperty('pr_number');
       expect(review.with).not.toHaveProperty('pr_head');
+    });
+
+    it('archon-deliver delegates the optional CI read timeout to the engine', () => {
+      const parsed = parseWorkflow(BUNDLED_WORKFLOWS['archon-deliver'], 'archon-deliver.yaml');
+      if (parsed.workflow === null) throw new Error(parsed.error.error);
+
+      const corrections = parsed.workflow.nodes.find(node => node.id === 'corrections');
+      expect(corrections?.kind).toBe('loop_group');
+      if (corrections?.kind !== 'loop_group') throw new Error('corrections is not a loop group');
+
+      const ciNote = corrections.loop_group.nodes.find(node => node.id === 'ci-note');
+      expect(ciNote?.kind).toBe('exec');
+      if (ciNote?.kind !== 'exec') throw new Error('ci-note is not executable');
+      expect(ciNote).toMatchObject({ runtime: 'sh', timeout: 45_000, on_timeout: 'skip' });
+      expect(ciNote.script).not.toContain('mktemp');
+      expect(ciNote.script).not.toContain('GH_PID');
+      expect(ciNote.script).not.toContain('WATCHDOG');
+
+      const ciEvidence = corrections.loop_group.nodes.find(node => node.id === 'ci-evidence');
+      expect(ciEvidence?.kind).toBe('exec');
+      if (ciEvidence?.kind !== 'exec') throw new Error('ci-evidence is not executable');
+      expect(ciEvidence).toMatchObject({
+        runtime: 'bun',
+        depends_on: ['ci-note'],
+        trigger_rule: 'all_done',
+        with: {
+          note: {
+            from: '$ci-note.output',
+            if_skipped:
+              'No CI evidence is available for this round (the check read timed out). Proceed on the review findings alone.',
+          },
+        },
+      });
+
+      const fix = corrections.loop_group.nodes.find(node => node.id === 'fix');
+      expect(fix?.depends_on).toEqual(['ci-evidence']);
     });
 
     it('archon-deliver validates review action before correction and carries the work order into recheck', () => {
@@ -368,6 +482,15 @@ describe('bundled-defaults', () => {
         correction_ready: { from: '$corrections.output.ready', if_skipped: false },
         correction_action: { from: '$corrections.output.action', if_skipped: null },
       });
+    });
+
+    it('flip-ready directly depends on every failable gate ancestor', () => {
+      const parsed = parseWorkflow(BUNDLED_WORKFLOWS['archon-deliver'], 'archon-deliver.yaml');
+      if (parsed.workflow === null) throw new Error(parsed.error.error);
+      const flipReady = parsed.workflow.nodes.find(node => node.id === 'flip-ready');
+      expect(flipReady?.depends_on).toContain('gate-validated');
+      expect(flipReady?.depends_on).toContain('gate-ready');
+      expect(flipReady?.depends_on).toContain('validate');
     });
 
     it('archon-review exposes the three-way action contract behind a successful preflight', () => {
@@ -495,6 +618,60 @@ describe('bundled-defaults', () => {
         expect(content.includes('nodes:')).toBe(true);
       }
     });
+
+    it('archon-validate makes applicability cheap and resumable without caching stale validation', () => {
+      const parsed = parseWorkflow(BUNDLED_WORKFLOWS['archon-validate'], 'archon-validate.yaml');
+      if (parsed.workflow === null) throw new Error(parsed.error.error);
+
+      const applicability = parsed.workflow.nodes.find(node => node.id === 'applicability');
+      const validateNode = parsed.workflow.nodes.find(node => node.id === 'validate');
+      const evidence = parsed.workflow.nodes.find(node => node.id === 'record-evidence');
+      const selected = parsed.workflow.nodes.find(node => node.id === 'selected-verdict');
+      expect(applicability).toMatchObject({
+        kind: 'exec',
+        runtime: 'bun',
+        script: 'validation-evidence',
+        always_run: true,
+        with: {
+          action: 'check',
+          scope: '$INPUTS.scope',
+          context: '$INPUTS.context',
+        },
+      });
+      expect(validateNode).toMatchObject({
+        kind: 'agent',
+        depends_on: ['applicability'],
+        when: '$applicability.output.reuse == false',
+        source: { with: { scope: '$INPUTS.scope' } },
+      });
+      expect(validateNode).not.toHaveProperty('always_run');
+      expect(evidence).toMatchObject({
+        kind: 'exec',
+        runtime: 'bun',
+        depends_on: ['applicability', 'validate'],
+        when: '$applicability.output.reuse == false',
+      });
+      expect(selected).toMatchObject({
+        kind: 'exec',
+        runtime: 'bun',
+        depends_on: ['applicability', 'validate', 'record-evidence'],
+        with: { action: 'select', context: '$INPUTS.context' },
+      });
+    });
+
+    it('carries validation scope and context through delivery, ship, lifecycle, and repair', () => {
+      const deliver = BUNDLED_WORKFLOWS['archon-deliver'];
+      const ship = BUNDLED_WORKFLOWS['archon-ship'];
+      const lifecycle = BUNDLED_WORKFLOWS['archon-lifecycle'];
+      expect(deliver).toContain('scope: "$INPUTS.validation_scope"');
+      expect(ship).toContain('validation_scope: "$INPUTS.validation_scope"');
+      expect(lifecycle.match(/validation_scope: "\$INPUTS\.validation_scope"/g)).toHaveLength(2);
+      expect(deliver).toContain('context: "$INPUTS.validation_context"');
+      expect(ship).toContain('validation_context: "$INPUTS.validation_context"');
+      expect(lifecycle.match(/validation_context: "\$INPUTS\.validation_context"/g)).toHaveLength(
+        2
+      );
+    });
   });
 
   describe('fork-safe PR creation (#2226)', () => {
@@ -554,13 +731,9 @@ describe('bundled-defaults', () => {
       const deliver = BUNDLED_WORKFLOWS['archon-deliver'];
       const sync = BUNDLED_COMMANDS['__archon_pack__bundled:sdlc:deliver::sync-pr-body'];
 
-      // The record is the bound `output_format` fields. The `pull-request` and
-      // `public-action` sidecar labels were declared beside them and nothing in the
-      // engine or the pack ever selected an artifact by either string, so they went
-      // (#2968 item 5): the explicit binding is the channel.
-      expect(pr).not.toContain('output_type:');
+      expect(pr).toContain('output_type: pull-request');
       expect(deliver).not.toContain('output_type: public-action');
-      expect(pr).toContain('required: [number, url, head, base, is_draft]');
+      expect(pr).toContain('required: [repo, number, url, head, base, is_draft]');
       expect(deliver).toContain('scope: "$pr.output.number"');
       expect(deliver).toContain('PR_NUMBER=$pr.output.number');
       // The flip selects by recorded number and does not re-derive the branch:
@@ -586,6 +759,23 @@ describe('bundled-defaults', () => {
       expect(sync).toContain('$INPUTS.pr_number');
       expect(sync).toContain('$INPUTS.pr_head');
       expect(sync).not.toContain('INPUTS_PR_NUMBER');
+      const prParsed = parseWorkflow(pr, 'archon-pr.yaml');
+      if (prParsed.workflow === null) throw new Error(prParsed.error.error);
+      const prNode = prParsed.workflow.nodes.find(node => node.id === 'pr');
+      expect(prNode?.kind).toBe('agent');
+      if (prNode?.kind !== 'agent') throw new Error('pr is not an agent node');
+      expect(prNode.output_type).toBe('pull-request');
+      expect(prNode.output_format).toMatchObject({
+        properties: {
+          repo: {
+            type: 'object',
+            properties: { host: { type: 'string' }, path: { type: 'string' } },
+            required: ['host', 'path'],
+          },
+          number: { type: 'integer' },
+        },
+        required: ['repo', 'number', 'url', 'head', 'base', 'is_draft'],
+      });
       const deliverParsed = parseWorkflow(deliver, 'archon-deliver.yaml');
       if (deliverParsed.workflow === null) throw new Error(deliverParsed.error.error);
       const syncNode = deliverParsed.workflow.nodes.find(node => node.id === 'sync-pr-body');
@@ -598,7 +788,7 @@ describe('bundled-defaults', () => {
       });
       // Composition once dropped that binding while materializing the command body
       // and then reported both names as missing caller inputs, so archon-deliver
-      // declared them with empty defaults purely to load inside ship/stabilize/upkeep
+      // declared them with empty defaults purely to load inside ship/upkeep
       // (#2968 item 4). Composition keeps the binding now (#2964), so the decoys are
       // gone — and the empty default that used to be spliced in where the real value
       // belongs cannot come back with them.
@@ -649,17 +839,25 @@ describe('bundled-defaults', () => {
             prompt: 'recorded PR',
             output_format: {
               type: 'object',
-              properties: { number: { type: 'integer' }, head: { type: 'string' } },
-              required: ['number', 'head'],
+              properties: {
+                repo: {
+                  type: 'object',
+                  properties: { host: { type: 'string' }, path: { type: 'string' } },
+                  required: ['host', 'path'],
+                },
+                number: { type: 'integer' },
+                head: { type: 'string' },
+              },
+              required: ['repo', 'number', 'head'],
             },
           },
         ],
       }).nodes[0];
-      const workflow = {
+      const workflow = resolveWorkflow({
         ...parsed.workflow,
         name: scenario.name,
         nodes: [producer!, { ...flipReady, depends_on: ['pr'] }],
-      };
+      });
       const directory = mkdtempSync(join(tmpdir(), 'archon-flip-ready-'));
       const bin = join(directory, 'bin');
       const log = join(directory, 'gh.log');
@@ -681,7 +879,13 @@ describe('bundled-defaults', () => {
           workflow,
           userMessage: '',
           cwd: directory,
-          stubs: { pr: { number: 42, head: 'recorded-branch' } },
+          stubs: {
+            pr: {
+              repo: { host: 'github.com', path: 'owner/repo' },
+              number: 42,
+              head: 'recorded-branch',
+            },
+          },
           execCode: true,
         });
         return { result, ghLog: readFileSync(log, 'utf-8') };
@@ -693,6 +897,32 @@ describe('bundled-defaults', () => {
         await removeTempTree(directory);
       }
     };
+
+    it('uses check events as wake-ups while retaining bounded probes and deadlines', () => {
+      const parsed = parseWorkflow(BUNDLED_WORKFLOWS['archon-deliver'], 'archon-deliver.yaml');
+      if (parsed.workflow === null) throw new Error(parsed.error.error);
+
+      for (const [groupId, probeId, pauseId] of [
+        ['await-checks', 'ci-probe', 'ci-pause'],
+        ['await-fix-checks', 'fix-ci-probe', 'fix-ci-pause'],
+      ] as const) {
+        const group = parsed.workflow.nodes.find(node => node.id === groupId);
+        if (group?.kind !== 'loop_group') throw new Error(`${groupId} is not a loop group`);
+        expect(group.loop_group.max_iterations).toBe(13);
+        expect(group.loop_group.until_bash).toContain('gh pr checks');
+
+        const probeIndex = group.loop_group.nodes.findIndex(node => node.id === probeId);
+        const pauseIndex = group.loop_group.nodes.findIndex(node => node.id === pauseId);
+        expect(probeIndex).toBeGreaterThanOrEqual(0);
+        expect(pauseIndex).toBeGreaterThan(probeIndex);
+        const pause = group.loop_group.nodes[pauseIndex];
+        if (pause?.kind !== 'wait') throw new Error(`${pauseId} is not a wait node`);
+        expect(pause.wait).toEqual({ event: 'checks.complete', deadline_ms: 300000 });
+        expect(pause.wait).not.toHaveProperty('duration_ms');
+        expect(pause.depends_on).toEqual([probeId]);
+        expect(pause.when).toBe(`$${probeId}.output.state == 'pending'`);
+      }
+    });
 
     it.skipIf(process.platform === 'win32')(
       'refuses an origin that does not resolve to an owner/repo before flipping ready',
@@ -732,12 +962,14 @@ describe('bundled-defaults', () => {
             '  "remote get-url origin") printf "%s\\n" "git@github.com:owner/repo.git" ;;',
             'esac',
           ],
-          // `gh pr checks` exits 1 and explains itself on stderr when a PR carries
-          // no checks — a repository with no CI, or checks a fork PR never starts.
+          // The node reads the check context count via gh's GraphQL API.
+          // A zero count means the PR carries no checks — a repository with no
+          // CI, or checks a fork PR never starts. No `pr checks` call follows.
           gh: [
             '#!/bin/sh',
             'printf "%s\\n" "$*" >> "$GH_LOG"',
             'case "$*" in',
+            '  "api graphql"*) printf "%s\\n" "0" ;;',
             '  "pr checks"*)',
             '    printf "%s\\n" "no checks reported on the \'recorded-branch\' branch" >&2',
             '    exit 1',
@@ -763,7 +995,7 @@ describe('bundled-defaults', () => {
     );
 
     it.skipIf(process.platform === 'win32')(
-      'refuses a non-green check and names the recovery instead of flipping',
+      'refuses a non-green check instead of flipping',
       async () => {
         const { result, ghLog } = await runFlipReady({
           name: 'red-checks-ready-flip',
@@ -773,15 +1005,16 @@ describe('bundled-defaults', () => {
             '  "remote get-url origin") printf "%s\\n" "git@github.com:owner/repo.git" ;;',
             'esac',
           ],
-          // Already jq-filtered, the way the node's own `--jq` leaves it: one failing
-          // check, exit 1 the way gh reports red.
+          // The count read sees checks; the classification returns one
+          // non-green check. Real gh with --json exits 0 on red (the --json
+          // exporter succeeds regardless of check outcome).
           gh: [
             '#!/bin/sh',
             'printf "%s\\n" "$*" >> "$GH_LOG"',
             'case "$*" in',
+            '  "api graphql"*) printf "%s\\n" "1" ;;',
             '  "pr checks"*)',
             '    printf "%s\\n" "test (windows-latest) (fail)"',
-            '    exit 1',
             '    ;;',
             'esac',
           ],
@@ -791,12 +1024,6 @@ describe('bundled-defaults', () => {
         const flip = result.trace.find(entry => entry.nodeId === 'flip-ready');
         expect(flip?.state).toBe('failed');
         expect(flip?.reason).toContain('test (windows-latest) (fail)');
-        // A run that dies here is recoverable in seconds, and the operator is the only
-        // one who can start it: a concluded check does not re-run itself, and nothing
-        // in this node waits for one (#2976). So the refusal says so rather than
-        // leaving it as tribal knowledge.
-        expect(flip?.reason).toContain('re-run the failing check');
-        expect(flip?.reason).toContain('resume this run');
         expect(ghLog).not.toContain('pr ready');
       }
     );
@@ -837,6 +1064,7 @@ describe('bundled-defaults', () => {
             gh: [
               '#!/bin/sh',
               'case "$*" in',
+              '  "api graphql"*) printf "%s\\n" "0" ;;',
               '  "pr checks"*)',
               '    printf "%s\\n" "no checks reported on the \'recorded-branch\' branch" >&2',
               '    exit 1',
