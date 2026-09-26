@@ -135,7 +135,11 @@ import {
   type LoopWithCompiledCommand,
   type IncludeCommandContent,
 } from './compiled-command';
-import { assistantModelDefaults, resolveNodeModel } from './node-model-resolution';
+import {
+  assistantModelDefaults,
+  resolveNodeModel,
+  type ResolutionOrigin,
+} from './node-model-resolution';
 import {
   logNodeStart,
   logNodeComplete,
@@ -159,6 +163,7 @@ import {
   lifecycleEventData,
   type NodeAuthContextV1,
   type NodeLifecycleIdentityV1,
+  type NodeProviderSource,
 } from './node-auth-context';
 import {
   classifyError,
@@ -742,6 +747,8 @@ interface WorkflowLevelOptions {
   /** Workflow-level tier keyword (when `workflow.model` is small/medium/large), so
    *  nodes that inherit the workflow model can still surface the `← tier` annotation. */
   workflowTier?: 'small' | 'medium' | 'large';
+  workflowModelRef?: string;
+  workflowProviderSource?: ResolutionOrigin;
 }
 
 /** Internal node execution result — extends NodeOutput with cost data for aggregation. */
@@ -1691,6 +1698,8 @@ async function resolveNodeProviderAndModel(
 ): Promise<{
   provider: string;
   model: string | undefined;
+  modelRef: string | undefined;
+  providerSource: NodeProviderSource;
   options: SendQueryOptions | undefined;
   tier?: TierName;
   effort?: EffortLevel;
@@ -1703,11 +1712,12 @@ async function resolveNodeProviderAndModel(
     {
       provider: workflowProvider,
       model: workflowModel,
+      modelRef: workflowLevelOptions.workflowModelRef,
       preset: workflowPreset,
       tier: workflowLevelOptions.workflowTier,
       effort: workflowLevelOptions.effort,
       // Only used to LABEL an inherited provider in a dry run; the executor discards it.
-      providerOrigin: 'workflow',
+      providerOrigin: workflowLevelOptions.workflowProviderSource ?? 'workflow',
     },
     assistantModelDefaults(config),
     aiProfile
@@ -2002,7 +2012,15 @@ async function resolveNodeProviderAndModel(
   // string (e.g. "opus"). Surface `tier` when the ref was a tier keyword — from
   // the node's own `model`, or (when the node inherits the workflow-level model)
   // from the workflow tier, mirroring the effectivePreset inheritance condition.
-  return { provider, model, options, tier: resolution.tier, effort: resolvedEffort };
+  return {
+    provider,
+    model,
+    modelRef: resolution.modelRef,
+    providerSource: resolution.providerOrigin.replace(' ', '_') as NodeProviderSource,
+    options,
+    tier: resolution.tier,
+    effort: resolvedEffort,
+  };
 }
 
 export type TriggerRuleDecision = { decision: 'run' } | { decision: 'skip'; cause: SkipCause };
@@ -2154,6 +2172,8 @@ async function executeNodeInternal(
   resolvedModel?: string,
   resolvedTier?: TierName,
   resolvedEffort?: EffortLevel,
+  resolvedModelRef?: string,
+  resolvedProviderSource: NodeProviderSource = 'unset',
   stepNamePrefix = '',
   iteration?: number,
   checkpointSession?: SessionCheckpoint,
@@ -2214,13 +2234,15 @@ async function executeNodeInternal(
     stepName,
     provider,
     model: resolvedModel,
+    modelRef: resolvedModelRef,
+    providerSource: resolvedProviderSource,
     tier: resolvedTier,
     effort: resolvedEffort,
     options: nodeOptions,
   });
   const lifecycleData = {
     ...lifecycleEventData(lifecycleIdentity),
-    ...authBindingEventData(authContext),
+    ...authBindingEventData(authContext, resolvedModelRef, resolvedProviderSource),
   };
 
   getLog().info({ nodeId: node.id, provider }, 'dag_node_started');
@@ -5994,6 +6016,8 @@ async function executeLoopNode(
   resolvedModel?: string,
   resolvedTier?: TierName,
   resolvedEffort?: EffortLevel,
+  resolvedModelRef?: string,
+  resolvedProviderSource: NodeProviderSource = 'unset',
   checkpointSession?: SessionCheckpoint
 ): Promise<NodeExecutionResult> {
   const {
@@ -6027,13 +6051,15 @@ async function executeLoopNode(
     stepName,
     provider: workflowProvider,
     model: resolvedModel,
+    modelRef: resolvedModelRef,
+    providerSource: resolvedProviderSource,
     tier: resolvedTier,
     effort: resolvedEffort,
     options: resolvedOptions,
   });
   const lifecycleData = {
     ...lifecycleEventData(lifecycleIdentity),
-    ...authBindingEventData(authContext),
+    ...authBindingEventData(authContext, resolvedModelRef, resolvedProviderSource),
   };
 
   // Emit node_started up-front so every terminal outcome of this loop node is
@@ -7990,6 +8016,8 @@ async function executeApprovalNode(
       options: nodeOptions,
       tier: resolvedTier,
       effort: resolvedEffort,
+      modelRef: resolvedModelRef,
+      providerSource: resolvedProviderSource,
     } = await resolveNodeProviderAndModel(
       syntheticNode,
       workflowProvider,
@@ -8019,6 +8047,8 @@ async function executeApprovalNode(
       resolvedNodeModel,
       resolvedTier,
       resolvedEffort,
+      resolvedModelRef,
+      resolvedProviderSource,
       stepNamePrefix,
       iteration,
       undefined // synthetic on_reject node never carries a session checkpoint
@@ -10049,6 +10079,8 @@ interface RunInputs {
   config: WorkflowConfig;
   workflowProvider: string;
   workflowModel: string | undefined;
+  /** Origin of the already-resolved workflow provider for lifecycle attribution. */
+  workflowProviderSource?: ResolutionOrigin;
   aiProfile?: ResolvedAiProfile;
   workflowPreset?: ModelAliasPreset;
   artifactsDir: string;
@@ -10195,12 +10227,18 @@ function registerLifecycleAttempt(
   ctx.activeLifecycleAttempts.set(stepName, { data, terminalWritten: false });
 }
 
-function authBindingEventData(context: NodeAuthContextV1): Record<string, unknown> {
+function authBindingEventData(
+  context: NodeAuthContextV1,
+  modelRef?: string,
+  providerSource: NodeProviderSource = 'unset'
+): Record<string, unknown> {
   return {
     run_id: context.run_id,
     context_id: context.context_id,
     context_sha256: context.context_sha256,
     billing: context.billing.class,
+    model_ref: modelRef ?? null,
+    provider_source: providerSource,
   };
 }
 
@@ -10210,6 +10248,8 @@ async function persistAiNodeAuthContext(params: {
   stepName: string;
   provider: string;
   model?: string;
+  modelRef?: string;
+  providerSource: NodeProviderSource;
   tier?: TierName;
   effort?: EffortLevel;
   options?: SendQueryOptions;
@@ -10242,7 +10282,7 @@ async function persistAiNodeAuthContext(params: {
   }
   registerLifecycleAttempt(params.ctx, params.stepName, {
     ...lifecycleEventData(params.identity),
-    ...authBindingEventData(context),
+    ...authBindingEventData(context, params.modelRef, params.providerSource),
   });
   return context;
 }
@@ -10858,6 +10898,8 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
                   model: resolvedLoopModel,
                   tier: resolvedLoopTier,
                   effort: resolvedLoopEffort,
+                  modelRef: resolvedLoopModelRef,
+                  providerSource: resolvedLoopProviderSource,
                 } = await resolveNodeProviderAndModel(
                   node,
                   ctx.workflowProvider,
@@ -10884,6 +10926,8 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
                   resolvedLoopModel,
                   resolvedLoopTier,
                   resolvedLoopEffort,
+                  resolvedLoopModelRef,
+                  resolvedLoopProviderSource,
                   checkpointSessionForProvider(loopProvider)
                 );
                 // Loop nodes run every iteration on the same resolved provider, so the
@@ -11012,6 +11056,8 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
               options: nodeOptions,
               tier: resolvedTier,
               effort: resolvedEffort,
+              modelRef: resolvedModelRef,
+              providerSource: resolvedProviderSource,
             } = await resolveNodeProviderAndModel(
               node,
               ctx.workflowProvider,
@@ -11207,6 +11253,8 @@ async function runLayers(ctx: RunLayersContext): Promise<void> {
                   resolvedNodeModel,
                   resolvedTier,
                   resolvedEffort,
+                  resolvedModelRef,
+                  resolvedProviderSource,
                   ctx.stepNamePrefix,
                   iteration,
                   checkpointSessionForProvider(provider),
@@ -11560,6 +11608,7 @@ function resolveNodeProviderForPreflight(
     {
       provider: resolvedWorkflowProvider,
       model: resolution?.workflowModel,
+      modelRef: undefined,
       preset: resolution?.workflowPreset,
       tier: resolution?.workflowTier,
       effort: resolution?.workflowEffort,
@@ -12094,6 +12143,7 @@ export async function executeDagWorkflow(
     workflowRun,
     workflowProvider,
     workflowModel,
+    workflowProviderSource,
     artifactsDir,
     stateDir,
     logDir,
@@ -12246,6 +12296,8 @@ export async function executeDagWorkflow(
     sandbox: workflow.sandbox,
     webSearchMode: workflow.webSearchMode,
     workflowTier,
+    workflowModelRef: workflow.model,
+    workflowProviderSource,
   };
   const layers = workflow.plan.layers;
   const nodeOutputs = new Map<string, NodeOutput>();

@@ -1560,6 +1560,57 @@ describe('executeWorkflow', () => {
       expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].workflowModel).toBe('gpt-5.6-sol');
     });
 
+    it('replays the sealed effective portable alias binding after config changes', async () => {
+      const preCreatedRun = makeRun({
+        id: 'resume-sealed-system-alias-run',
+        status: 'running',
+        metadata: {
+          model_bindings: {
+            overrides: {},
+            effective: {
+              defaultProvider: 'codex',
+              aliases: {
+                small: { provider: 'codex', model: 'gpt-small' },
+                medium: { provider: 'codex', model: 'gpt-medium' },
+                large: { provider: 'codex', model: 'gpt-5.6-sol' },
+              },
+            },
+          },
+        },
+      });
+      const deps = makeDeps();
+      deps.loadConfig = mock(async () => ({
+        assistant: 'claude',
+        assistants: { claude: {}, codex: {} },
+        aliases: { '@architect': { provider: 'claude', model: 'new-opus' } },
+        tiers: { large: { provider: 'claude', model: 'new-opus' } },
+        baseBranch: '',
+        commands: { folder: '' },
+      })) as WorkflowDeps['loadConfig'];
+
+      await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow({ model: '@architect' }),
+        'msg',
+        'db-conv-1',
+        { preCreatedRun, priorCompletedNodes: new Map() }
+      );
+
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].workflowProvider).toBe('codex');
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].workflowModel).toBe('gpt-5.6-sol');
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].aiProfile).toEqual({
+        defaultProvider: 'codex',
+        aliases: {
+          small: { provider: 'codex', model: 'gpt-small' },
+          medium: { provider: 'codex', model: 'gpt-medium' },
+          large: { provider: 'codex', model: 'gpt-5.6-sol' },
+        },
+      });
+    });
+
     it('terminalizes a resumed run before dispatch when persisted effort is ineffective', async () => {
       const failRun = mock<IWorkflowStore['failWorkflowRun']>(async () => {});
       const preCreatedRun = makeRun({

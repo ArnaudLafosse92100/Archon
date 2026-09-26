@@ -19,6 +19,7 @@ import {
 } from '@archon/paths';
 import { getDatabaseType } from '@archon/core';
 import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '@archon/providers/types';
+import { PORTABLE_SYSTEM_ALIAS_TIERS } from '@archon/workflows/model-validation';
 
 const log = createLogger('cli:version');
 
@@ -147,8 +148,18 @@ export async function versionCommand(json = false): Promise<void> {
         name: 'archon',
         version,
         revision,
-        capabilities: ['archon-auth-context-v1', 'codegraph_managed_v1'],
+        capabilities: [
+          'archon-auth-context-v1',
+          'codegraph_managed_v1',
+          'portable-model-aliases-v1',
+        ],
         contracts: {
+          'workflow.portable_model_aliases': {
+            version: 1,
+            aliases: PORTABLE_SYSTEM_ALIAS_TIERS,
+            telemetryFields: ['model_ref', 'provider_source'],
+            lifecycleEvents: ['node_started', 'node_completed', 'node_failed'],
+          },
           'node_failed.data.error_class': NODE_FAILURE_CLASS_CONTRACT,
           'workflow.credential_policy.codex': CODEX_CREDENTIAL_POLICY_CONTRACT,
           'workflow.credential_policy.claude': CLAUDE_CREDENTIAL_POLICY_CONTRACT,

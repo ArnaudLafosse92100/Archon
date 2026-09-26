@@ -461,7 +461,7 @@ export function hasRunModelOverrides(overrides: ResolvedRunModelOverrides): bool
 export function runOverrideAppliesToRef(
   overrides: ResolvedRunModelOverrides,
   ref: string | undefined,
-  baseProfile: ResolvedAiProfile
+  baseProfile?: ResolvedAiProfile
 ): boolean {
   if (!ref) return false;
   if (isTierName(ref)) return overrides.tiers?.[ref] !== undefined;
@@ -471,7 +471,7 @@ export function runOverrideAppliesToRef(
   // A configured alias shadows the portable virtual default, so a tier
   // override did not affect this reference. Callers that care about exact
   // attribution pass the lower profile used to apply the sparse run layer.
-  if (baseProfile.aliases[ref] !== undefined) return false;
+  if (baseProfile?.aliases[ref] !== undefined) return false;
   const implicitTier = portableSystemAliasTier(ref);
   return implicitTier !== undefined && overrides.tiers?.[implicitTier] !== undefined;
 }

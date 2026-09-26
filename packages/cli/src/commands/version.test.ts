@@ -82,8 +82,23 @@ describe('versionCommand', () => {
     expect(JSON.parse(consoleSpy.mock.calls[0][0] as string)).toEqual(
       expect.objectContaining({
         revision,
-        capabilities: ['archon-auth-context-v1', 'codegraph_managed_v1'],
+        capabilities: [
+          'archon-auth-context-v1',
+          'codegraph_managed_v1',
+          'portable-model-aliases-v1',
+        ],
         contracts: {
+          'workflow.portable_model_aliases': {
+            version: 1,
+            aliases: {
+              '@implementer': 'medium',
+              '@architect': 'large',
+              '@reviewer': 'medium',
+              '@adjudicator': 'medium',
+            },
+            telemetryFields: ['model_ref', 'provider_source'],
+            lifecycleEvents: ['node_started', 'node_completed', 'node_failed'],
+          },
           'node_failed.data.error_class': {
             version: 1,
             values: ['fatal', 'transient', 'unknown'],

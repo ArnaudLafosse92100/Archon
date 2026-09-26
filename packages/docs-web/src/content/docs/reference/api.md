@@ -317,7 +317,7 @@ curl -X POST http://localhost:3090/api/workflows/review-block/run \
 
 Values are validated against the workflow's declaration before any worktree, clone, or AI cost: a missing **required** input and an **undeclared** name are both refused up front, through the same contract a composing `with:` map goes through. `400` if `inputs` is not an object of strings (or, on multipart, not valid JSON). An empty object is the same as omitting the field.
 
-**Rebinding models for one run.** Optional `tiers` and `aliases` maps change only the named tier or existing `@alias` for this invocation. Every other binding keeps its normal user → repo → global → built-in value.
+**Rebinding models for one run.** Optional `tiers` and `aliases` maps change only the named tier, configured `@alias`, or portable system alias (`@implementer`, `@architect`, `@reviewer`, `@adjudicator`) for this invocation. Every other binding keeps its normal user → repo → global → built-in value.
 
 ```bash
 # JSON: only `large` changes

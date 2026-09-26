@@ -2265,8 +2265,14 @@ export async function executeWorkflow(
     }
     throw error;
   }
-  const aiProfile = applyResolvedRunModelOverrides(baseAiProfile, resolvedModelOverrides);
-  const modelBindingsMetadata = createRunModelBindingsMetadata(resolvedModelOverrides, aiProfile);
+  // A continuation replays the sealed effective profile, not today's mutable config.
+  // Sparse overrides alone are insufficient: unoverridden tiers/aliases may have changed
+  // while the run was paused. Older runs without this metadata retain legacy behavior.
+  const aiProfile =
+    persistedModelBindings?.effective ??
+    applyResolvedRunModelOverrides(baseAiProfile, resolvedModelOverrides);
+  const modelBindingsMetadata =
+    persistedModelBindings ?? createRunModelBindingsMetadata(resolvedModelOverrides, aiProfile);
   if (hasRunModelOverrides(resolvedModelOverrides)) {
     getLog().info(
       {
@@ -3360,6 +3366,7 @@ export async function executeWorkflow(
         workflowRun: runForDag,
         workflowProvider: resolvedProvider,
         workflowModel: resolvedModel,
+        workflowProviderSource: scope.providerOrigin,
         artifactsDir,
         stateDir,
         logDir,

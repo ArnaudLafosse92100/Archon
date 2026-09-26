@@ -2,6 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { ProviderLaunchAttestationV1 } from '@archon/providers/types';
 
 export type NodeBillingClass = 'subscription' | 'metered' | 'unknown';
+export type NodeProviderSource =
+  | 'node'
+  | 'model_ref'
+  | 'workflow'
+  | 'assistant_config'
+  | 'default_assistant'
+  | 'unset';
 
 export interface NodeLifecycleIdentityV1 {
   nodeId: string;

@@ -4364,6 +4364,69 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
     expect(mockSendQueryDag).not.toHaveBeenCalled();
   });
 
+  it('persists the exact authored model ref and provider source on start and terminal only', async () => {
+    const deps = createMockDeps();
+    await executeDagWorkflow(
+      dagOptions({
+        deps,
+        cwd: testDir,
+        aiProfile: buildAiProfile('claude'),
+        workflow: {
+          name: 'semantic-route-telemetry',
+          nodes: [
+            {
+              id: 'architect',
+              kind: 'agent',
+              model: '@architect',
+              source: { kind: 'inline', prompt: 'design' },
+            },
+            {
+              id: 'tier-worker',
+              kind: 'agent',
+              model: 'medium',
+              source: { kind: 'inline', prompt: 'implement' },
+            },
+            {
+              id: 'literal-worker',
+              kind: 'agent',
+              model: 'literal-model-id',
+              source: { kind: 'inline', prompt: 'implement literally' },
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('semantic-route-telemetry'),
+      })
+    );
+
+    const event = (type: string) =>
+      persistedEvents(deps.store).find(
+        item => item.event_type === type && item.step_name === 'architect'
+      )!;
+    const auth = event('node_auth_context_v1');
+    const started = event('node_started');
+    const completed = event('node_completed');
+    expect(auth.data?.model_ref).toBeUndefined();
+    expect(auth.data?.provider_source).toBeUndefined();
+    for (const event of [started, completed]) {
+      expect(event.data).toMatchObject({
+        model_ref: '@architect',
+        provider_source: 'model_ref',
+      });
+    }
+    for (const [step, modelRef, providerSource] of [
+      ['tier-worker', 'medium', 'model_ref'],
+      ['literal-worker', 'literal-model-id', 'workflow'],
+    ] as const) {
+      for (const type of ['node_started', 'node_completed']) {
+        expect(
+          persistedEvents(deps.store).find(
+            item => item.event_type === type && item.step_name === step
+          )?.data
+        ).toMatchObject({ model_ref: modelRef, provider_source: providerSource });
+      }
+    }
+  });
+
   it('binds a post-auth provider-resolution throw to the same AI attempt', async () => {
     mockGetAgentProviderDag.mockImplementation(() => {
       throw new Error('provider registry unavailable');

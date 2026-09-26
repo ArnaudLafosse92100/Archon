@@ -35,6 +35,8 @@ export type ResolutionOrigin =
 export interface NodeModelResolution {
   provider: string;
   model: string | undefined;
+  /** Exact author-facing model selector before resolution. */
+  modelRef: string | undefined;
   /** Reasoning depth before any provider capability gate is applied. */
   effort: EffortLevel | undefined;
   /** Reasoning depth the AUTHOR declared (node or workflow), before any preset fills in. */
@@ -59,6 +61,7 @@ export interface NodeModelResolution {
 export interface WorkflowModelScope {
   provider: string;
   model: string | undefined;
+  modelRef: string | undefined;
   preset: ModelAliasPreset | undefined;
   tier: TierName | undefined;
   /** Workflow-level `effort:`, still read as a per-node fallback. */
@@ -155,6 +158,7 @@ export function resolveNodeModel(
   return {
     provider,
     model,
+    modelRef: node.model ?? (provider === scope.provider ? scope.modelRef : undefined),
     effort,
     declaredEffort,
     tier,
@@ -202,6 +206,7 @@ export function resolveWorkflowModelScope(
   return {
     provider,
     model,
+    modelRef: workflow.model,
     preset,
     tier: workflow.model && isTierName(workflow.model) ? workflow.model : undefined,
     effort: workflow.effort,

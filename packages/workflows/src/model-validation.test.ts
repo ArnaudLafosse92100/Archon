@@ -521,6 +521,9 @@ describe('per-run model bindings', () => {
       model: 'gpt-5.6-sol',
     });
     expect(runOverrideAppliesToRef(run, '@architect', profile)).toBe(true);
+    // Public subpath callers predating the optional attribution profile keep the
+    // two-argument form; absent shadowing evidence, the portable fallback applies.
+    expect(runOverrideAppliesToRef(run, '@architect')).toBe(true);
   });
 
   test('tier attribution stays false when a configured alias shadows the virtual default', () => {
