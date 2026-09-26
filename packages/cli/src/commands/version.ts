@@ -108,6 +108,14 @@ const CLAUDE_CREDENTIAL_POLICY_CONTRACT = {
   evidence: 'local_credential_resolution',
 } as const;
 
+const PROVIDER_LAUNCH_ATTESTATION_CONTRACT = {
+  version: 1,
+  evidence: 'local_launch_preparation',
+  envPolicy: 'targeted_empty_overrides',
+  aliasSemantics: 'neutralized_not_absent',
+  billingClaim: 'unverified',
+} as const;
+
 export async function versionCommand(json = false): Promise<void> {
   let version: string;
   let gitCommit: string;
@@ -141,6 +149,7 @@ export async function versionCommand(json = false): Promise<void> {
           'node_failed.data.error_class': NODE_FAILURE_CLASS_CONTRACT,
           'workflow.credential_policy.codex': CODEX_CREDENTIAL_POLICY_CONTRACT,
           'workflow.credential_policy.claude': CLAUDE_CREDENTIAL_POLICY_CONTRACT,
+          'workflow.provider_launch_attestation': PROVIDER_LAUNCH_ATTESTATION_CONTRACT,
         },
       })
     );

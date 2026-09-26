@@ -413,10 +413,10 @@ async function resolveUserProviderEnvForWorkflow(
       provider: 'codex',
       credential: { ...codexCredential, kind: 'subscription' },
       deliveryEnv: { CODEX_HOME: expectedCodexHome },
-      absentApiAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
+      neutralizedAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
       deliveredAliases: ['CODEX_HOME'],
       managedPathIdentity: CODEX_AUTH_JSON_RELATIVE_PATH,
-      sanitizedEnvPolicy: 'explicit_empty_override',
+      envPolicy: 'targeted_empty_overrides',
     };
   }
 
@@ -459,10 +459,11 @@ async function resolveUserProviderEnvForWorkflow(
         ANTHROPIC_OAUTH_TOKEN: claudeCodeToken,
         CLAUDE_CONFIG_DIR: claudeConfigDir,
       },
-      absentApiAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+      neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
       deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
       managedPathIdentity: CLAUDE_CONFIG_RELATIVE_PATH,
-      sanitizedEnvPolicy: 'explicit_empty_override',
+      envPolicy: 'targeted_empty_overrides',
+      filesystemSettingsPolicy: 'disabled',
     };
   }
 

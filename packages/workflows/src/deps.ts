@@ -59,10 +59,11 @@ export interface PreparedProviderLaunch {
   provider: StrictSubscriptionProvider;
   credential: ProviderCredentialProvenance & { kind: 'subscription' };
   deliveryEnv: Record<string, string>;
-  absentApiAliases: readonly string[];
+  neutralizedAliases: readonly string[];
   deliveredAliases: readonly string[];
   managedPathIdentity?: string;
-  sanitizedEnvPolicy: 'explicit_empty_override';
+  envPolicy: 'targeted_empty_overrides';
+  filesystemSettingsPolicy?: 'disabled';
 }
 
 export type UserProviderEnvResolution =

@@ -1447,10 +1447,17 @@ export class ClaudeProvider implements IAgentProvider {
     // process.env never crosses the boundary (the isolation invariant); the host
     // path inherits the (already-cleaned) process env exactly as before.
     const env = buildRequestSubprocessEnv(requestOptions);
-    const settingSources =
-      requestOptions?.nodeConfig?.settingSources ??
-      assistantDefaults.settingSources ??
-      (['project', 'user'] as const);
+    const isStrictSubscriptionLaunch =
+      requestOptions?.providerLaunchAttestation?.provider === 'claude';
+    // Filesystem settings can inject env after the SDK receives its subprocess
+    // env. A strict subscription launch must therefore disable every project
+    // and user setting source at this final provider boundary, regardless of
+    // node or assistant defaults. Runs without an attestation are unchanged.
+    const settingSources: readonly ('project' | 'user')[] = isStrictSubscriptionLaunch
+      ? []
+      : (requestOptions?.nodeConfig?.settingSources ??
+        assistantDefaults.settingSources ??
+        (['project', 'user'] as const));
 
     // Apply nodeConfig translation once (deterministic, not retry-dependent)
     // We need a throwaway Options to extract warnings from applyNodeConfig,

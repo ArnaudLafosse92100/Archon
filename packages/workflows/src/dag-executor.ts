@@ -1858,8 +1858,9 @@ async function resolveNodeProviderAndModel(
       : undefined;
   if (preparedLaunch) {
     // Both built-in providers merge request env over process.env. Empty-string
-    // overrides are therefore the only portable way to make inherited aliases
-    // absent at the actual subprocess boundary without mutating process.env.
+    // overrides are therefore the portable way to neutralize inherited aliases
+    // at the actual subprocess boundary without mutating process.env. The keys
+    // remain present with empty values; this is not an environment allowlist.
     const sanitizedEnv: Record<string, string> = { ...config.envVars };
     for (const key of [
       'OPENAI_API_KEY',
@@ -1881,12 +1882,15 @@ async function resolveNodeProviderAndModel(
       nodeId: node.id,
       ...(model ? { model } : {}),
       credential: preparedLaunch.credential,
-      absentApiAliases: preparedLaunch.absentApiAliases,
+      neutralizedAliases: preparedLaunch.neutralizedAliases,
       deliveredAliases: preparedLaunch.deliveredAliases,
       ...(preparedLaunch.managedPathIdentity
         ? { managedPathIdentity: preparedLaunch.managedPathIdentity }
         : {}),
-      sanitizedEnvPolicy: preparedLaunch.sanitizedEnvPolicy,
+      envPolicy: preparedLaunch.envPolicy,
+      ...(preparedLaunch.filesystemSettingsPolicy
+        ? { filesystemSettingsPolicy: preparedLaunch.filesystemSettingsPolicy }
+        : {}),
       // The provider owns its executable resolver and may defer to an SDK in
       // development mode. Do not claim a path or digest that is not bound to
       // the eventual spawn.

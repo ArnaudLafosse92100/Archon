@@ -97,6 +97,13 @@ describe('versionCommand', () => {
             requiredKinds: ['subscription'],
             evidence: 'local_credential_resolution',
           },
+          'workflow.provider_launch_attestation': {
+            version: 1,
+            evidence: 'local_launch_preparation',
+            envPolicy: 'targeted_empty_overrides',
+            aliasSemantics: 'neutralized_not_absent',
+            billingClaim: 'unverified',
+          },
         },
       })
     );

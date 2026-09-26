@@ -629,10 +629,11 @@ export interface ProviderLaunchAttestationV1 {
     kind: 'subscription';
     delivery: 'environment' | 'managed_file';
   };
-  absentApiAliases: readonly string[];
+  neutralizedAliases: readonly string[];
   deliveredAliases: readonly string[];
   managedPathIdentity?: string;
-  sanitizedEnvPolicy: 'explicit_empty_override';
+  envPolicy: 'targeted_empty_overrides';
+  filesystemSettingsPolicy?: 'disabled';
   executableIdentity: { status: 'deferred_to_provider' };
   billingClaim: 'unverified';
 }

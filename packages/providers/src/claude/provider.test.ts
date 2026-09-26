@@ -1639,6 +1639,45 @@ describe('ClaudeProvider', () => {
       expect(callArgs.options.settingSources).toEqual([]);
     });
 
+    test('strict subscription launch disables project and user setting sources at provider boundary', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'test-session' };
+      });
+
+      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+        nodeConfig: { settingSources: ['project'] },
+        assistantConfig: { settingSources: ['project', 'user'] },
+        env: {
+          ANTHROPIC_API_KEY: '',
+          CLAUDE_API_KEY: '',
+          CLAUDE_CODE_OAUTH_TOKEN: 'strict-oauth-token',
+          ANTHROPIC_OAUTH_TOKEN: 'strict-oauth-token',
+        },
+        providerLaunchAttestation: {
+          version: 1,
+          provider: 'claude',
+          nodeId: 'strict-reviewer',
+          credential: {
+            vendor: 'anthropic',
+            kind: 'subscription',
+            delivery: 'environment',
+          },
+          neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+          deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN'],
+          envPolicy: 'targeted_empty_overrides',
+          filesystemSettingsPolicy: 'disabled',
+          executableIdentity: { status: 'deferred_to_provider' },
+          billingClaim: 'unverified',
+        },
+      })) {
+        // consume
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      expect(callArgs.options.settingSources).toEqual([]);
+    });
+
     test('passes env from requestOptions into SDK options', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };

@@ -2926,9 +2926,10 @@ describe('executeWorkflow', () => {
       expect(prepared).toMatchObject({
         provider: 'claude',
         credential: { vendor: 'anthropic', kind: 'subscription', delivery: 'environment' },
-        absentApiAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
+        neutralizedAliases: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
         deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
-        sanitizedEnvPolicy: 'explicit_empty_override',
+        envPolicy: 'targeted_empty_overrides',
+        filesystemSettingsPolicy: 'disabled',
       });
       expect(prepared?.deliveryEnv).toMatchObject({
         CLAUDE_CODE_OAUTH_TOKEN: token,
