@@ -317,11 +317,51 @@ describe('ClaudeProvider', () => {
         for await (const _chunk of client.sendQuery('test', '/workspace')) {
           // The terminal result must be refused before it can be emitted.
         }
-      }).toThrow('Claude SDK reported multiple models for one attested turn');
+      }).toThrow(
+        'Claude SDK reported multiple models for one attested turn: claude-haiku-4-5-20251001, claude-sonnet-5'
+      );
       expect(mockLogger.error).toHaveBeenCalledWith(
         { models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5'] },
         'claude.resolved_model_multi_model_refused'
       );
+    });
+
+    test('attributes the visible assistant model and preserves transparent helper usage', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield {
+          type: 'assistant',
+          message: {
+            model: 'claude-opus-5-5',
+            content: [{ type: 'text', text: 'Approved.' }],
+          },
+        };
+        yield {
+          type: 'result',
+          session_id: 'sid-helper-model',
+          modelUsage: {
+            'claude-haiku-4-5-20251001': {
+              inputTokens: 10,
+              outputTokens: 2,
+              cacheReadInputTokens: 0,
+            },
+            'claude-opus-5-5': {
+              inputTokens: 100,
+              outputTokens: 50,
+              cacheReadInputTokens: 10,
+            },
+          },
+        };
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) chunks.push(chunk);
+      expect(chunks.at(-1)).toMatchObject({
+        type: 'result',
+        resolvedModel: {
+          id: 'claude-opus-5-5',
+          observedIds: ['claude-haiku-4-5-20251001', 'claude-opus-5-5'],
+        },
+      });
     });
 
     test('omits resolvedModel when modelUsage is an empty record', async () => {

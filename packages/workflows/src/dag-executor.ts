@@ -3450,7 +3450,15 @@ async function executeNodeInternal(
           ...(nodeStopReason ? { stop_reason: nodeStopReason } : {}),
           ...(nodeNumTurns !== undefined ? { num_turns: nodeNumTurns } : {}),
           ...(nodeResolvedModel
-            ? { model_usage: { requested: resolvedModel, resolved: nodeResolvedModel.id } }
+            ? {
+                model_usage: {
+                  requested: resolvedModel,
+                  resolved: nodeResolvedModel.id,
+                  ...(nodeResolvedModel.observedIds
+                    ? { observed: nodeResolvedModel.observedIds }
+                    : {}),
+                },
+              }
             : {}),
           ...(namedResumeSourceNodeId !== undefined
             ? {
@@ -7584,7 +7592,15 @@ async function executeLoopNode(
             // mirrors the AI-node path. Omitted entirely when the provider
             // reports no resolved model (e.g. Codex), never faked.
             ...(loopResolvedModel
-              ? { model_usage: { requested: resolvedModel, resolved: loopResolvedModel.id } }
+              ? {
+                  model_usage: {
+                    requested: resolvedModel,
+                    resolved: loopResolvedModel.id,
+                    ...(loopResolvedModel.observedIds
+                      ? { observed: loopResolvedModel.observedIds }
+                      : {}),
+                  },
+                }
               : {}),
             // Background Agent tasks still live when any iteration's stream
             // ended (#2083) — this node's artifacts may be incomplete, even

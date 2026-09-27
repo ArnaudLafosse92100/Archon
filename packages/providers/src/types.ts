@@ -301,6 +301,8 @@ export function mergeTokenUsage(usages: readonly TokenUsage[]): TokenUsage | und
 /** Concrete model identifier reported by a provider after a request completes. */
 export interface ResolvedModel {
   id: string;
+  /** Every concrete model reported for the turn, including transparent SDK helpers. */
+  observedIds?: string[];
 }
 
 /**

@@ -45,6 +45,7 @@ import type {
   TokenUsage,
   ProviderCapabilities,
   NodeConfig,
+  ResolvedModel,
 } from '../types';
 import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '../types';
 import { parseClaudeConfig } from './config';
@@ -202,16 +203,37 @@ function normalizeClaudeUsage(usage?: {
  * `modelUsage` crosses an IPC boundary, so absent/empty records remain guarded
  * and cause the caller to omit `resolvedModel` rather than inventing evidence.
  */
-function requireSingleResolvedModelId(
-  modelUsage: Record<string, ModelUsage> | undefined
-): string | undefined {
+function resolveAttestedModel(
+  modelUsage: Record<string, ModelUsage> | undefined,
+  assistantModels: ReadonlySet<string>
+): ResolvedModel | undefined {
   if (!modelUsage) return undefined;
   const entries = Object.entries(modelUsage);
   if (entries.length === 0) return undefined;
-  if (entries.length === 1) return entries[0][0];
   const models = entries.map(([id]) => id);
+  if (assistantModels.size === 1) {
+    const [primary] = assistantModels;
+    if (!models.includes(primary)) {
+      getLog().error({ primary, models }, 'claude.resolved_model_primary_usage_missing');
+      throw new Error(`Claude assistant model is absent from SDK usage: ${primary}`);
+    }
+    return {
+      id: primary,
+      ...(models.length > 1 ? { observedIds: models } : {}),
+    };
+  }
+  if (assistantModels.size > 1) {
+    const primaryModels = [...assistantModels];
+    getLog().error({ primaryModels, models }, 'claude.resolved_model_multi_primary_refused');
+    throw new Error(
+      `Claude SDK emitted multiple assistant models for one attested turn: ${primaryModels.join(', ')}`
+    );
+  }
+  if (entries.length === 1) return { id: entries[0][0] };
   getLog().error({ models }, 'claude.resolved_model_multi_model_refused');
-  throw new Error('Claude SDK reported multiple models for one attested turn');
+  throw new Error(
+    `Claude SDK reported multiple models for one attested turn: ${models.join(', ')}`
+  );
 }
 
 /**
@@ -1027,6 +1049,7 @@ async function* streamClaudeMessages(
   // field on a '<synthetic>' assistant message, then `is_error: true` on the
   // result. See ClaudeApiResultError.
   let pendingSdkError: { code: SDKAssistantMessageError; text: string } | undefined;
+  const assistantModels = new Set<string>();
   // Progress frames carry no visibility marker, so retain the start decision
   // for the lifetime of this query and suppress the complete hidden lifecycle.
   const hiddenTaskIds = new Set<string>();
@@ -1053,6 +1076,7 @@ async function* streamClaudeMessages(
         message: { content: ContentBlock[]; model?: string };
         error?: SDKAssistantMessageError;
       };
+      if (message.message.model) assistantModels.add(message.message.model);
       const content = message.message.content;
 
       // API-level failure surfaced as text (#1797): the SDK writes the error
@@ -1234,7 +1258,7 @@ async function* streamClaudeMessages(
       yield { type: 'rate_limit', rateLimitInfo: rateLimitMsg.rate_limit_info ?? {} };
     } else if (event.type === 'result') {
       const resultMsg = msg as SDKResultMessage;
-      const resolvedModelId = requireSingleResolvedModelId(resultMsg.modelUsage);
+      const resolvedModel = resolveAttestedModel(resultMsg.modelUsage, assistantModels);
       // The terminal result resolves any recorded synthetic error message.
       const syntheticError = pendingSdkError;
       pendingSdkError = undefined;
@@ -1324,7 +1348,7 @@ async function* streamClaudeMessages(
         ...(resultMsg.total_cost_usd !== undefined ? { cost: resultMsg.total_cost_usd } : {}),
         ...(resultMsg.stop_reason != null ? { stopReason: resultMsg.stop_reason } : {}),
         ...(resultMsg.num_turns !== undefined ? { numTurns: resultMsg.num_turns } : {}),
-        ...(resolvedModelId ? { resolvedModel: { id: resolvedModelId } } : {}),
+        ...(resolvedModel ? { resolvedModel } : {}),
       };
     }
   }
