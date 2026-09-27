@@ -4184,6 +4184,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
             OPENAI_API_KEY: 'ambient-openai',
             CODEX_API_KEY: 'ambient-codex',
             CODEX_HOME: '/ambient/codex',
+            OPENROUTER_API_KEY: 'ambient-openrouter',
             ANTHROPIC_API_KEY: 'ambient-anthropic',
             CLAUDE_API_KEY: 'ambient-claude',
             CLAUDE_CODE_OAUTH_TOKEN: 'ambient-oauth',
@@ -4223,9 +4224,10 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
     for (const options of seenOptions) {
       expect(options.env).toEqual(
         expect.objectContaining({
-          OPENAI_API_KEY: 'ambient-openai',
-          CODEX_API_KEY: 'ambient-codex',
-          CODEX_HOME: '/ambient/codex',
+          OPENAI_API_KEY: '',
+          CODEX_API_KEY: '',
+          CODEX_HOME: '',
+          OPENROUTER_API_KEY: '',
           PROJECT_VAR: 'preserved',
           CLAUDE_CODE_OAUTH_TOKEN: token,
           ANTHROPIC_OAUTH_TOKEN: token,
@@ -4381,7 +4383,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
             {
               id: 'architect',
               kind: 'agent',
-              model: '@architect',
+              model: '@explorer',
               source: { kind: 'inline', prompt: 'design' },
             },
             {
@@ -4413,14 +4415,14 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
     expect(auth.data?.provider_source).toBeUndefined();
     for (const event of [started, completed]) {
       expect(event.data).toMatchObject({
-        model_ref: '@architect',
+        model_ref: '@explorer',
         provider_source: 'model_ref',
       });
     }
     for (const type of ['node_started', 'node_completed'] as const) {
       expect(
         liveEvents.find(event => event.type === type && event.nodeId === 'architect')
-      ).toMatchObject({ model_ref: '@architect', provider_source: 'model_ref' });
+      ).toMatchObject({ model_ref: '@explorer', provider_source: 'model_ref' });
     }
     for (const [step, modelRef, providerSource] of [
       ['tier-worker', 'medium', 'model_ref'],
@@ -4518,8 +4520,11 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
             OPENAI_API_KEY: 'ambient-openai',
             CODEX_API_KEY: 'ambient-codex',
             CODEX_HOME: '/ambient/codex-home',
+            OPENROUTER_API_KEY: 'ambient-openrouter',
             ANTHROPIC_API_KEY: 'ambient-anthropic',
             CLAUDE_CODE_OAUTH_TOKEN: 'ambient-claude-oauth',
+            ANTHROPIC_OAUTH_TOKEN: 'ambient-claude-oauth',
+            CLAUDE_CONFIG_DIR: '/ambient/claude-config',
           },
           preparedProviderLaunches: {
             codex: {
@@ -4547,8 +4552,11 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
       OPENAI_API_KEY: '',
       CODEX_API_KEY: '',
       CODEX_HOME: '/run/codex-home',
-      ANTHROPIC_API_KEY: 'ambient-anthropic',
-      CLAUDE_CODE_OAUTH_TOKEN: 'ambient-claude-oauth',
+      OPENROUTER_API_KEY: '',
+      ANTHROPIC_API_KEY: '',
+      CLAUDE_CODE_OAUTH_TOKEN: '',
+      ANTHROPIC_OAUTH_TOKEN: '',
+      CLAUDE_CONFIG_DIR: '',
     });
     expect(options?.providerLaunchAttestation).toMatchObject({
       provider: 'codex',
@@ -4601,7 +4609,17 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
         workflowRun: makeWorkflowRun('mixed-strict-and-metered'),
         config: {
           ...minimalConfig,
-          envVars: { OPENAI_API_KEY: 'ambient-openai', PI_ONLY: 'kept-for-builder' },
+          envVars: {
+            OPENAI_API_KEY: 'ambient-openai',
+            CODEX_API_KEY: 'ambient-codex',
+            CODEX_HOME: '/ambient/codex-home',
+            ANTHROPIC_API_KEY: 'ambient-anthropic',
+            CLAUDE_CODE_OAUTH_TOKEN: 'ambient-claude-oauth',
+            ANTHROPIC_OAUTH_TOKEN: 'ambient-claude-oauth',
+            CLAUDE_CONFIG_DIR: '/ambient/claude-config',
+            OPENROUTER_API_KEY: 'openrouter-only-for-pi',
+            PI_ONLY: 'kept-for-builder',
+          },
           preparedProviderLaunches: {
             codex: {
               provider: 'codex',
@@ -4625,13 +4643,35 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
     expect(seen[0]).toMatchObject({
       provider: 'codex',
       options: {
-        env: { OPENAI_API_KEY: '', CODEX_HOME: '/run/codex-home' },
+        env: {
+          OPENAI_API_KEY: '',
+          CODEX_API_KEY: '',
+          CODEX_HOME: '/run/codex-home',
+          ANTHROPIC_API_KEY: '',
+          CLAUDE_CODE_OAUTH_TOKEN: '',
+          ANTHROPIC_OAUTH_TOKEN: '',
+          CLAUDE_CONFIG_DIR: '',
+          OPENROUTER_API_KEY: '',
+          PI_ONLY: 'kept-for-builder',
+        },
         providerLaunchAttestation: { provider: 'codex', nodeId: 'planner' },
       },
     });
     expect(seen[1]).toMatchObject({
       provider: 'pi',
-      options: { env: { OPENAI_API_KEY: 'ambient-openai', PI_ONLY: 'kept-for-builder' } },
+      options: {
+        env: {
+          OPENAI_API_KEY: '',
+          CODEX_API_KEY: '',
+          CODEX_HOME: '',
+          ANTHROPIC_API_KEY: '',
+          CLAUDE_CODE_OAUTH_TOKEN: '',
+          ANTHROPIC_OAUTH_TOKEN: '',
+          CLAUDE_CONFIG_DIR: '',
+          OPENROUTER_API_KEY: 'openrouter-only-for-pi',
+          PI_ONLY: 'kept-for-builder',
+        },
+      },
     });
     expect(seen[1]?.options?.providerLaunchAttestation).toBeUndefined();
   });

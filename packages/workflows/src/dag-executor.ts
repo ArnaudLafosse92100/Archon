@@ -25,6 +25,7 @@ import type {
   WorkflowMessageMetadata,
   WorkflowConfig,
   WorkflowDeps,
+  PreparedProviderLaunch,
 } from './deps';
 import type {
   SendQueryOptions,
@@ -197,6 +198,71 @@ import {
   type ResolvedAiProfile,
   type TierName,
 } from './model-validation';
+
+const CLAUDE_PROVIDER_CREDENTIAL_ENV_KEYS = [
+  ...STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_OAUTH_TOKEN',
+  'CLAUDE_CONFIG_DIR',
+] as const;
+const CODEX_PROVIDER_CREDENTIAL_ENV_KEYS = [
+  'OPENAI_API_KEY',
+  'CODEX_API_KEY',
+  'CODEX_HOME',
+] as const;
+const PI_PROVIDER_CREDENTIAL_ENV_KEYS = ['OPENROUTER_API_KEY'] as const;
+const PROVIDER_SCOPED_CREDENTIAL_ENV_KEYS = [
+  ...CLAUDE_PROVIDER_CREDENTIAL_ENV_KEYS,
+  ...CODEX_PROVIDER_CREDENTIAL_ENV_KEYS,
+  ...PI_PROVIDER_CREDENTIAL_ENV_KEYS,
+] as const;
+
+/**
+ * Build the per-call environment at the last shared boundary before provider
+ * dispatch. Once a run prepares any strict subscription credential, provider
+ * credentials stop being run-global: every foreign credential alias is kept as
+ * an empty override so provider SDKs cannot recover it from process.env.
+ *
+ * Non-credential project variables remain available to every provider. Pi keeps
+ * the configured OpenRouter key, Claude receives only its prepared OAuth/config
+ * delivery, and Codex receives only its prepared CODEX_HOME.
+ */
+function buildProviderScopedEnvironment(
+  provider: string,
+  config: WorkflowConfig
+): {
+  env: Record<string, string> | undefined;
+  preparedLaunch: PreparedProviderLaunch | undefined;
+} {
+  const preparedLaunch =
+    provider === 'codex' || provider === 'claude'
+      ? config.preparedProviderLaunches?.[provider]
+      : undefined;
+  const hasStrictSubscription =
+    config.preparedProviderLaunches?.codex !== undefined ||
+    config.preparedProviderLaunches?.claude !== undefined;
+
+  if (!hasStrictSubscription) {
+    return {
+      env:
+        config.envVars && Object.keys(config.envVars).length > 0
+          ? { ...config.envVars }
+          : undefined,
+      preparedLaunch,
+    };
+  }
+
+  const configuredEnv = config.envVars ?? {};
+  const scopedEnv: Record<string, string> = { ...configuredEnv };
+  for (const key of PROVIDER_SCOPED_CREDENTIAL_ENV_KEYS) scopedEnv[key] = '';
+
+  if (provider === 'pi' && configuredEnv.OPENROUTER_API_KEY !== undefined) {
+    scopedEnv.OPENROUTER_API_KEY = configuredEnv.OPENROUTER_API_KEY;
+  }
+  if (preparedLaunch !== undefined) Object.assign(scopedEnv, preparedLaunch.deliveryEnv);
+
+  return { env: scopedEnv, preparedLaunch };
+}
 
 /**
  * Closed-set node type for telemetry — mirrors the DagNode discriminators.
@@ -1866,30 +1932,12 @@ async function resolveNodeProviderAndModel(
   if (execContext.kind === 'container') {
     baseOptions.execContext = execContext;
   }
-  const preparedLaunch =
-    provider === 'codex' || provider === 'claude'
-      ? config.preparedProviderLaunches?.[provider]
-      : undefined;
+  const providerEnvironment = buildProviderScopedEnvironment(provider, config);
+  const preparedLaunch = providerEnvironment.preparedLaunch;
+  if (providerEnvironment.env !== undefined) {
+    baseOptions.env = providerEnvironment.env;
+  }
   if (preparedLaunch) {
-    // Both built-in providers merge request env over process.env. Empty-string
-    // overrides are therefore the portable way to neutralize inherited aliases
-    // at the actual subprocess boundary without mutating process.env. The keys
-    // remain present with empty values; this is not an environment allowlist.
-    const sanitizedEnv: Record<string, string> = { ...config.envVars };
-    const neutralizedKeys =
-      preparedLaunch.provider === 'claude'
-        ? [
-            ...STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
-            'CLAUDE_CODE_OAUTH_TOKEN',
-            'ANTHROPIC_OAUTH_TOKEN',
-            'CLAUDE_CONFIG_DIR',
-          ]
-        : ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME'];
-    for (const key of neutralizedKeys) {
-      sanitizedEnv[key] = '';
-    }
-    Object.assign(sanitizedEnv, preparedLaunch.deliveryEnv);
-    baseOptions.env = sanitizedEnv;
     baseOptions.providerLaunchAttestation = {
       version: 1,
       provider: preparedLaunch.provider,
@@ -1911,8 +1959,6 @@ async function resolveNodeProviderAndModel(
       executableIdentity: { status: 'deferred_to_provider' },
       billingClaim: 'unverified',
     };
-  } else if (config.envVars && Object.keys(config.envVars).length > 0) {
-    baseOptions.env = config.envVars;
   }
   if (config.protectedEnvKeys && config.protectedEnvKeys.length > 0) {
     baseOptions.protectedEnvKeys = config.protectedEnvKeys;

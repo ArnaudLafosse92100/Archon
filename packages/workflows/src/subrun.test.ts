@@ -1096,6 +1096,10 @@ nodes:
           ANTHROPIC_API_KEY: 'ambient-api-key',
           CLAUDE_CODE_OAUTH_TOKEN: token,
           ANTHROPIC_OAUTH_TOKEN: token,
+          OPENAI_API_KEY: 'foreign-openai-key',
+          CODEX_API_KEY: 'foreign-codex-key',
+          CODEX_HOME: '/foreign/codex-home',
+          OPENROUTER_API_KEY: 'foreign-openrouter-key',
         },
         files: [],
         protectedValues: ['ambient-api-key', token],
@@ -1150,6 +1154,10 @@ nodes:
       CLAUDE_CODE_OAUTH_TOKEN: token,
       ANTHROPIC_OAUTH_TOKEN: token,
       CLAUDE_CONFIG_DIR: expect.any(String),
+      OPENAI_API_KEY: '',
+      CODEX_API_KEY: '',
+      CODEX_HOME: '',
+      OPENROUTER_API_KEY: '',
     });
     expect(options.providerLaunchAttestation).toMatchObject({
       provider: 'claude',

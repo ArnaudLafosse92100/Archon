@@ -13,6 +13,7 @@ export type TierName = z.infer<typeof tierNameSchema>;
  * configured alias with the same name still wins.
  */
 export const PORTABLE_SYSTEM_ALIAS_TIERS = {
+  '@explorer': 'small',
   '@implementer': 'medium',
   '@architect': 'large',
   '@reviewer': 'medium',

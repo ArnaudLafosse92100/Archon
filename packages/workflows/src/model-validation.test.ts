@@ -59,6 +59,7 @@ describe('TIER_NAMES constant', () => {
 describe('portable system aliases', () => {
   test('exposes the stable capability-to-tier contract', () => {
     expect(PORTABLE_SYSTEM_ALIAS_TIERS).toEqual({
+      '@explorer': 'small',
       '@implementer': 'medium',
       '@architect': 'large',
       '@reviewer': 'medium',
@@ -69,6 +70,7 @@ describe('portable system aliases', () => {
   test('resolves virtual aliases through their live tier presets', () => {
     const profile = buildAiProfile('claude', {
       repoTiers: {
+        small: { provider: 'pi', model: 'openrouter/z-ai/glm-5.3-flash' },
         medium: { provider: 'codex', model: 'gpt-5.6-sol' },
         large: { provider: 'claude', model: 'opus' },
       },
@@ -78,6 +80,7 @@ describe('portable system aliases', () => {
       provider: 'codex',
       model: 'gpt-5.6-sol',
     });
+    expect(resolveModelSpec(profile, '@explorer')).toEqual(resolveModelSpec(profile, 'small'));
     expect(resolveModelSpec(profile, '@architect')).toEqual({
       provider: 'claude',
       model: 'opus',

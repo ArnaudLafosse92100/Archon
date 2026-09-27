@@ -57,6 +57,7 @@ nodes:
 
   - id: scope
     command: review-scope
+    model: "@explorer"
     context: fresh
     depends_on: [mode]
     output_format:

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { removeTempTree } from '@archon/paths/test-utils';
 import { ClaudeProvider } from './provider';
 import { STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS } from '../types';
 
@@ -30,6 +31,10 @@ describe('strict Claude provider launch isolation', () => {
       CLAUDE_CODE_USE_BEDROCK: '1',
       CLAUDE_CODE_USE_VERTEX: '1',
       CLAUDE_CODE_USE_FOUNDRY: '1',
+      OPENAI_API_KEY: 'ambient-openai-must-not-cross',
+      CODEX_API_KEY: 'ambient-codex-must-not-cross',
+      CODEX_HOME: '/ambient/codex-home-must-not-cross',
+      OPENROUTER_API_KEY: 'ambient-openrouter-must-not-cross',
     };
     const originalAmbientRoutes = Object.fromEntries(
       Object.keys(ambientRoutes).map(key => [key, process.env[key]])
@@ -69,6 +74,10 @@ fs.appendFileSync(process.env.ARCHON_CAPTURE_PATH, JSON.stringify({
   bedrock: effectiveEnv.CLAUDE_CODE_USE_BEDROCK ?? null,
   vertex: effectiveEnv.CLAUDE_CODE_USE_VERTEX ?? null,
   foundry: effectiveEnv.CLAUDE_CODE_USE_FOUNDRY ?? null,
+  openaiApiKey: effectiveEnv.OPENAI_API_KEY ?? null,
+  codexApiKey: effectiveEnv.CODEX_API_KEY ?? null,
+  codexHome: effectiveEnv.CODEX_HOME ?? null,
+  openrouterApiKey: effectiveEnv.OPENROUTER_API_KEY ?? null,
   oauthToken: effectiveEnv.CLAUDE_CODE_OAUTH_TOKEN ?? null,
 }) + '\\n');
 process.exit(1);
@@ -88,6 +97,10 @@ process.exit(1);
           assistantConfig: { settingSources: ['project', 'user'] },
           env: {
             ...Object.fromEntries(STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS.map(key => [key, ''])),
+            OPENAI_API_KEY: '',
+            CODEX_API_KEY: '',
+            CODEX_HOME: '',
+            OPENROUTER_API_KEY: '',
             ARCHON_CAPTURE_PATH: capturePath,
             CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
             ANTHROPIC_OAUTH_TOKEN: oauthToken,
@@ -136,6 +149,10 @@ process.exit(1);
         expect(capture.bedrock).toBe('');
         expect(capture.vertex).toBe('');
         expect(capture.foundry).toBe('');
+        expect(capture.openaiApiKey).toBe('');
+        expect(capture.codexApiKey).toBe('');
+        expect(capture.codexHome).toBe('');
+        expect(capture.openrouterApiKey).toBe('');
         expect(capture.oauthToken).toBe(oauthToken);
         expect(JSON.stringify(capture)).not.toContain(projectApiKey);
       }
@@ -144,7 +161,7 @@ process.exit(1);
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
-      rmSync(root, { recursive: true, force: true });
+      await removeTempTree(root);
     }
   }, 10_000);
 });

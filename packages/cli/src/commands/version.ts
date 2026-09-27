@@ -155,11 +155,11 @@ export async function versionCommand(json = false): Promise<void> {
         capabilities: [
           'archon-auth-context-v1',
           'codegraph_managed_v1',
-          'portable-model-aliases-v1',
+          'portable-model-aliases-v2',
         ],
         contracts: {
           'workflow.portable_model_aliases': {
-            version: 1,
+            version: 2,
             aliases: PORTABLE_SYSTEM_ALIAS_TIERS,
             telemetryFields: ROUTING_TELEMETRY_FIELDS,
             lifecycleEvents: ROUTING_LIFECYCLE_EVENT_TYPES,

@@ -522,6 +522,7 @@ describe('bundled-defaults', () => {
       expect(scope?.depends_on).toEqual(['mode']);
       expect(scope?.kind).toBe('agent');
       if (scope?.kind !== 'agent') throw new Error('scope is not an agent');
+      expect(scope.model).toBe('@explorer');
       expect(scope.output_format).toEqual({
         type: 'object',
         properties: { docs: { type: 'boolean' } },
