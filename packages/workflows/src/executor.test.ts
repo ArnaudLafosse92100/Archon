@@ -4,7 +4,7 @@
  * that the inner dag-executor.test.ts cannot reach.
  */
 import { describe, it, expect, mock, beforeEach, spyOn } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'path';
 import { randomUUID } from 'node:crypto';
@@ -3051,11 +3051,18 @@ describe('executeWorkflow', () => {
         envPolicy: 'targeted_empty_overrides',
         filesystemSettingsPolicy: 'disabled',
       });
+      const claudeConfigDir = prepared?.deliveryEnv.CLAUDE_CONFIG_DIR;
       expect(prepared?.deliveryEnv).toMatchObject({
         CLAUDE_CODE_OAUTH_TOKEN: token,
         ANTHROPIC_OAUTH_TOKEN: token,
         CLAUDE_CONFIG_DIR: expect.any(String),
       });
+      expect(mockExecuteDagWorkflow.mock.calls[0]?.[0].config.envVars).not.toHaveProperty(
+        'CLAUDE_CODE_OAUTH_TOKEN'
+      );
+      expect(typeof claudeConfigDir).toBe('string');
+      expect(claudeConfigDir!.includes('/artifacts/')).toBe(false);
+      await expect(stat(claudeConfigDir!)).rejects.toThrow();
     });
 
     it('fails before DAG when strict Claude delivery lacks either OAuth alias', async () => {
@@ -3198,6 +3205,15 @@ describe('executeWorkflow', () => {
     });
 
     it('restores strict Codex policy on resume and accepts managed subscription delivery', async () => {
+      let privateCodexHome: string | undefined;
+      mockExecuteDagWorkflow.mockImplementation(async options => {
+        privateCodexHome = options.config.preparedProviderLaunches?.codex?.deliveryEnv.CODEX_HOME;
+        expect(privateCodexHome).toBeDefined();
+        expect(await readFile(join(privateCodexHome!, 'auth.json'), 'utf8')).toBe(
+          'managed-oauth-material'
+        );
+        return undefined;
+      });
       const getUserProviderEnv = mock(async (_userId: string, artifactsDir: string) => {
         const expectedAuthPath = join(artifactsDir, 'codex-home', 'auth.json');
         return {
@@ -3230,13 +3246,15 @@ describe('executeWorkflow', () => {
       const artifactsDir = getUserProviderEnv.mock.calls[0]?.[1];
       expect(result.success).toBe(true);
       expect(artifactsDir).toBeDefined();
-      expect(await readFile(join(artifactsDir!, 'codex-home', 'auth.json'), 'utf8')).toBe(
-        'managed-oauth-material'
-      );
+      expect(privateCodexHome).not.toContain(artifactsDir!);
+      await expect(
+        readFile(join(artifactsDir!, 'codex-home', 'auth.json'), 'utf8')
+      ).rejects.toThrow();
+      await expect(readFile(join(privateCodexHome!, 'auth.json'), 'utf8')).rejects.toThrow();
       expect(mockExecuteDagWorkflow).toHaveBeenCalledTimes(1);
     });
 
-    it('fails before DAG when strict managed credential file cannot be written', async () => {
+    it('does not materialize unrelated adapter credential files in a strict run', async () => {
       const parentFile = join(tmpdir(), `archon-policy-parent-${randomUUID()}`);
       await writeFile(parentFile, 'occupied');
       const deps: WorkflowDeps = {
@@ -3271,13 +3289,11 @@ describe('executeWorkflow', () => {
           'db-c1',
           { userId: 'u-1', runConfig: credentialPolicy }
         );
-        expect(result).toMatchObject({
-          success: false,
-          error: 'credential_policy_file_write_failed',
-        });
+        expect(result.success).toBe(true);
         expect(JSON.stringify(result)).not.toContain('secret-oauth-material');
         expect(JSON.stringify(result)).not.toContain(parentFile);
-        expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+        expect(mockExecuteDagWorkflow).toHaveBeenCalledTimes(1);
+        await expect(readFile(join(parentFile, 'blocked'), 'utf8')).rejects.toThrow();
       } finally {
         await rm(parentFile, { force: true });
       }

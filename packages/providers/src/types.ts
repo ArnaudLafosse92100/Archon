@@ -7,7 +7,7 @@ import type { EffortRung } from '@archon/paths/effort';
 /**
  * Authentication and routing inputs that must be neutralized for a strict
  * Claude subscription launch. This list is pinned to the Claude Code binary
- * shipped by @anthropic-ai/claude-agent-sdk 0.3.251 (Claude Code 2.1.251).
+ * shipped by @anthropic-ai/claude-agent-sdk 0.3.283 (Claude Code 2.1.283).
  * Keep preparation, provider enforcement, attestation, and regression fixtures
  * on this single source of truth.
  */
@@ -21,6 +21,7 @@ export const STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS = [
   'AWS_BEARER_TOKEN_BEDROCK',
   'AGENT_PROXY_AUTH_TOKEN',
   'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR',
   'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
   'CLAUDE_CODE_HOST_CREDS_FILE',
   'CLAUDE_CODE_HFI_BEARER_TOKEN',

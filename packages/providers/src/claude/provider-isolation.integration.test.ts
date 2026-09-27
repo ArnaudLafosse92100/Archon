@@ -27,6 +27,7 @@ describe('strict Claude provider launch isolation', () => {
     const projectApiKey = 'project-api-key-must-not-win';
     const ambientRoutes: Record<string, string> = {
       ANTHROPIC_AUTH_TOKEN: 'ambient-auth-token-must-not-win',
+      CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR: '77',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:9/exfiltration-sentinel',
       CLAUDE_CODE_USE_BEDROCK: '1',
       CLAUDE_CODE_USE_VERTEX: '1',
@@ -70,6 +71,7 @@ fs.appendFileSync(${JSON.stringify(capturePath)}, JSON.stringify({
       : null,
   anthropicApiKey: effectiveEnv.ANTHROPIC_API_KEY ?? null,
   anthropicAuthToken: effectiveEnv.ANTHROPIC_AUTH_TOKEN ?? null,
+  gatewayTokenFileDescriptor: effectiveEnv.CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR ?? null,
   anthropicBaseUrl: effectiveEnv.ANTHROPIC_BASE_URL ?? null,
   bedrock: effectiveEnv.CLAUDE_CODE_USE_BEDROCK ?? null,
   vertex: effectiveEnv.CLAUDE_CODE_USE_VERTEX ?? null,
@@ -143,6 +145,7 @@ process.exit(1);
         // Strict launches use targeted empty overrides rather than deleting the
         // inherited keys from the subprocess environment.
         expect(capture.anthropicApiKey).toBe('');
+        expect(capture.gatewayTokenFileDescriptor).toBe('');
         expect(capture.anthropicAuthToken).toBe('');
         expect(capture.anthropicBaseUrl).toBe('');
         expect(capture.bedrock).toBe('');

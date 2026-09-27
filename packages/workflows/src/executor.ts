@@ -1,10 +1,11 @@
 /**
  * Workflow Executor - runs DAG-based workflows
  */
-import { mkdir, readdir, rename, rm, stat, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { dirname, join } from 'path';
+import { tmpdir } from 'os';
 import {
   CLAUDE_CONFIG_RELATIVE_PATH,
   CODEX_AUTH_JSON_RELATIVE_PATH,
@@ -334,7 +335,8 @@ async function resolveUserProviderEnvForWorkflow(
   deps: WorkflowDeps,
   userId: string | undefined,
   artifactsDir: string,
-  requiredSubscriptions: ReadonlySet<StrictSubscriptionProvider> = new Set()
+  requiredSubscriptions: ReadonlySet<StrictSubscriptionProvider> = new Set(),
+  strictCredentialRoots?: Partial<Record<StrictSubscriptionProvider, string>>
 ): Promise<{
   env: Record<string, string>;
   protectedValues: string[];
@@ -411,10 +413,14 @@ async function resolveUserProviderEnvForWorkflow(
     if (resolved.issues.some(issue => issue.vendor === 'openai')) {
       failCredentialPolicy(credentialPolicyErrorCodes.deliveryFailed);
     }
+    const privateCodexHome = strictCredentialRoots?.codex;
+    if (!privateCodexHome) {
+      failCredentialPolicy(credentialPolicyErrorCodes.fileWriteFailed);
+    }
     preparedProviderLaunches.codex = {
       provider: 'codex',
       credential: { ...codexCredential, kind: 'subscription' },
-      deliveryEnv: { CODEX_HOME: expectedCodexHome },
+      deliveryEnv: { CODEX_HOME: privateCodexHome },
       neutralizedAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
       deliveredAliases: ['CODEX_HOME'],
       managedPathIdentity: CODEX_AUTH_JSON_RELATIVE_PATH,
@@ -452,7 +458,10 @@ async function resolveUserProviderEnvForWorkflow(
     if (resolved.issues.some(issue => issue.vendor === 'anthropic')) {
       failCredentialPolicy(credentialPolicyErrorCodes.deliveryFailed);
     }
-    const claudeConfigDir = join(artifactsDir, CLAUDE_CONFIG_RELATIVE_PATH);
+    const claudeConfigDir = strictCredentialRoots?.claude;
+    if (!claudeConfigDir) {
+      failCredentialPolicy(credentialPolicyErrorCodes.fileWriteFailed);
+    }
     preparedProviderLaunches.claude = {
       provider: 'claude',
       credential: { ...claudeCredential, kind: 'subscription' },
@@ -470,13 +479,39 @@ async function resolveUserProviderEnvForWorkflow(
   }
 
   const { env, files, protectedValues } = resolved;
+  let effectiveEnv = env;
+  let filesToWrite = files;
+  if (strict) {
+    // A strict mixed-provider run must never receive the adapter's global
+    // credential bag. Only the explicitly metered Pi route is retained here;
+    // subscription credentials are injected at the final provider boundary.
+    // The aggregate Pi auth file is deliberately not materialized.
+    effectiveEnv =
+      typeof env.OPENROUTER_API_KEY === 'string'
+        ? { OPENROUTER_API_KEY: env.OPENROUTER_API_KEY }
+        : {};
+    filesToWrite = [];
+    if (requiredSubscriptions.has('codex')) {
+      const sourcePath = join(artifactsDir, CODEX_AUTH_JSON_RELATIVE_PATH);
+      const source = files.find(file => file.path === sourcePath);
+      const privateCodexHome = strictCredentialRoots?.codex;
+      if (!source || !privateCodexHome) {
+        failCredentialPolicy(credentialPolicyErrorCodes.deliveryMismatch);
+      }
+      filesToWrite.push({ path: join(privateCodexHome, 'auth.json'), contents: source.contents });
+    }
+  }
   try {
-    for (const f of files) {
+    for (const f of filesToWrite) {
       await mkdir(dirname(f.path), { recursive: true });
       await writeFile(f.path, f.contents, { encoding: 'utf8', mode: 0o600 });
     }
     if (requiredSubscriptions.has('claude')) {
-      await mkdir(join(artifactsDir, CLAUDE_CONFIG_RELATIVE_PATH), {
+      const privateClaudeConfig = strictCredentialRoots?.claude;
+      if (!privateClaudeConfig) {
+        failCredentialPolicy(credentialPolicyErrorCodes.fileWriteFailed);
+      }
+      await mkdir(privateClaudeConfig, {
         recursive: true,
         mode: 0o700,
       });
@@ -489,11 +524,11 @@ async function resolveUserProviderEnvForWorkflow(
     return { env: {}, protectedValues, preparedProviderLaunches: {} };
   }
 
-  const envKeys = Object.keys(env);
+  const envKeys = Object.keys(effectiveEnv);
   if (envKeys.length > 0) {
     getLog().debug({ userId, keys: envKeys }, 'workflow.user_provider_env_injected');
   }
-  return { env, protectedValues, preparedProviderLaunches };
+  return { env: effectiveEnv, protectedValues, preparedProviderLaunches };
 }
 
 /**
@@ -3044,6 +3079,31 @@ export async function executeWorkflow(
   ) {
     requiredSubscriptions.add('claude');
   }
+  const strictCredentialRoots: Partial<Record<StrictSubscriptionProvider, string>> = {};
+  try {
+    if (requiredSubscriptions.has('codex')) {
+      strictCredentialRoots.codex = await mkdtemp(join(tmpdir(), 'archon-codex-credentials-'));
+    }
+    if (requiredSubscriptions.has('claude')) {
+      strictCredentialRoots.claude = await mkdtemp(join(tmpdir(), 'archon-claude-config-'));
+    }
+  } catch (_error) {
+    await Promise.all(
+      Object.values(strictCredentialRoots).map(path => rm(path, { recursive: true, force: true }))
+    );
+    const code = credentialPolicyErrorCodes.fileWriteFailed;
+    getLog().error({ workflowRunId: workflowRun.id, code }, 'workflow.credential_policy_failed');
+    await sendCriticalMessage(
+      platform,
+      conversationId,
+      `Workflow blocked by credential policy: ${code}`
+    );
+    await requireTerminalStatusWrite(deps.store.failWorkflowRun(workflowRun.id, code), {
+      workflowRunId: workflowRun.id,
+      site: 'workflow.credential_policy_private_root_fail_db_record_failed',
+    });
+    return { success: false, workflowRunId: workflowRun.id, error: code };
+  }
   let userProviderEnv: Record<string, string>;
   let protectedValues: string[];
   let preparedProviderLaunches: Partial<Record<StrictSubscriptionProvider, PreparedProviderLaunch>>;
@@ -3056,9 +3116,13 @@ export async function executeWorkflow(
       deps,
       executionUserId,
       artifactsDir,
-      requiredSubscriptions
+      requiredSubscriptions,
+      strictCredentialRoots
     ));
   } catch (error) {
+    await Promise.all(
+      Object.values(strictCredentialRoots).map(path => rm(path, { recursive: true, force: true }))
+    );
     const code =
       error instanceof CredentialPolicyError
         ? error.code
@@ -3524,6 +3588,9 @@ export async function executeWorkflow(
     // may throw — so it always pairs with the acquire above this try, on every
     // exit path (success, thrown error, or backstop failure).
     keepAwake.release();
+    await Promise.all(
+      Object.values(strictCredentialRoots).map(path => rm(path, { recursive: true, force: true }))
+    );
     // Defensive backstop: if the workflow run is still 'running' after all
     // normal and exceptional code paths, flip it to 'failed' to prevent zombie
     // accumulation. Guards against any future code path that exits without

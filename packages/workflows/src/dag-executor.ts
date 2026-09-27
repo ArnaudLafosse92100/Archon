@@ -46,6 +46,7 @@ import { loadMcpConfig } from '@archon/providers/mcp/config';
 import type { ContainerRunContext } from './container-context';
 import { WRITEBACK_GATE_NODE_ID } from './container-context';
 import {
+  PI_PROVIDER_ENV_VARS,
   getProviderCapabilities,
   getRegisteredProviders,
   isRegisteredProvider,
@@ -210,11 +211,25 @@ const CODEX_PROVIDER_CREDENTIAL_ENV_KEYS = [
   'CODEX_API_KEY',
   'CODEX_HOME',
 ] as const;
-const PI_PROVIDER_CREDENTIAL_ENV_KEYS = ['OPENROUTER_API_KEY'] as const;
+const AMBIENT_CLOUD_CREDENTIAL_ENV_KEYS = [
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_PROFILE',
+  'AWS_WEB_IDENTITY_TOKEN_FILE',
+  'AWS_ROLE_ARN',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'AZURE_CLIENT_ID',
+  'AZURE_CLIENT_SECRET',
+  'AZURE_TENANT_ID',
+  'AZURE_FEDERATED_TOKEN_FILE',
+] as const;
 const PROVIDER_SCOPED_CREDENTIAL_ENV_KEYS = [
   ...CLAUDE_PROVIDER_CREDENTIAL_ENV_KEYS,
   ...CODEX_PROVIDER_CREDENTIAL_ENV_KEYS,
-  ...PI_PROVIDER_CREDENTIAL_ENV_KEYS,
+  ...new Set(Object.values(PI_PROVIDER_ENV_VARS)),
+  ...AMBIENT_CLOUD_CREDENTIAL_ENV_KEYS,
+  'ARCHON_PI_AUTH_PATH',
 ] as const;
 
 /**
