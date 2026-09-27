@@ -330,6 +330,15 @@ describe('ClaudeProvider', () => {
       mockQuery.mockImplementation(async function* () {
         yield {
           type: 'assistant',
+          parent_tool_use_id: 'toolu_helper',
+          message: {
+            model: 'claude-haiku-4-5-20251001',
+            content: [{ type: 'text', text: 'Internal helper result.' }],
+          },
+        };
+        yield {
+          type: 'assistant',
+          parent_tool_use_id: null,
           message: {
             model: 'claude-opus-5-5',
             content: [{ type: 'text', text: 'Approved.' }],

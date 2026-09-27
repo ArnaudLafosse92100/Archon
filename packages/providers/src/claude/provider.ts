@@ -1075,8 +1075,15 @@ async function* streamClaudeMessages(
       const message = msg as {
         message: { content: ContentBlock[]; model?: string };
         error?: SDKAssistantMessageError;
+        parent_tool_use_id?: string | null;
       };
-      if (message.message.model) assistantModels.add(message.message.model);
+      if (
+        message.parent_tool_use_id == null &&
+        message.message.model &&
+        message.message.model !== '<synthetic>'
+      ) {
+        assistantModels.add(message.message.model);
+      }
       const content = message.message.content;
 
       // API-level failure surfaced as text (#1797): the SDK writes the error
