@@ -118,7 +118,7 @@ describe('versionCommand', () => {
             version: 1,
             evidence: 'local_launch_preparation',
             envPolicy: 'strict_child_allowlist_v1',
-            aliasSemantics: 'neutralized_not_absent',
+            aliasSemantics: 'neutralized_absent',
             strictClaudeNeutralizedAliases: expect.arrayContaining([
               'ANTHROPIC_API_KEY',
               'CLAUDE_API_KEY',

@@ -1360,6 +1360,34 @@ describe('CodexProvider', () => {
       expect(mockStartThread).toHaveBeenCalledTimes(1);
     });
 
+    test('strict subscription attestation never falls back to inherited process env', async () => {
+      const run = async () => {
+        for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
+          providerLaunchAttestation: {
+            version: 1,
+            provider: 'codex',
+            nodeId: 'strict-implementer',
+            credential: {
+              vendor: 'openai',
+              kind: 'subscription',
+              delivery: 'managed_file',
+            },
+            neutralizedAliases: [],
+            deliveredAliases: ['CODEX_HOME'],
+            managedPathIdentity: 'codex-home/auth.json',
+            envPolicy: 'strict_child_allowlist_v1',
+            executableIdentity: { status: 'deferred_to_provider' },
+            billingClaim: 'unverified',
+          },
+        })) {
+          // consume
+        }
+      };
+
+      await expect(run()).rejects.toThrow('strict_subscription_env_missing_private_home');
+      expect(MockCodex).not.toHaveBeenCalled();
+    });
+
     test('builds env by preserving process vars and letting request env win on collisions', async () => {
       const originalPath = process.env.PATH;
       const originalArchonEnv = process.env.ARCHON_CODEX_TEST_ENV;

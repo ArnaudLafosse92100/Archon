@@ -118,7 +118,7 @@ const PROVIDER_LAUNCH_ATTESTATION_CONTRACT = {
   version: 1,
   evidence: 'local_launch_preparation',
   envPolicy: 'strict_child_allowlist_v1',
-  aliasSemantics: 'neutralized_not_absent',
+  aliasSemantics: 'neutralized_absent',
   strictClaudeNeutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
   billingClaim: 'unverified',
 } as const;

@@ -914,8 +914,8 @@ export class CodexProvider implements IAgentProvider {
     try {
       const codexOptions: CodexOptions = {
         codexPathOverride: await resolveCodexBinaryPath(configCodexBinaryPath),
-        ...(requestEnv && Object.keys(requestEnv).length > 0
-          ? { env: buildCodexEnv(requestEnv, attestation) }
+        ...(attestation || (requestEnv && Object.keys(requestEnv).length > 0)
+          ? { env: buildCodexEnv(requestEnv ?? {}, attestation) }
           : {}),
         ...(codexConfigOverrides ? { config: codexConfigOverrides } : {}),
       };

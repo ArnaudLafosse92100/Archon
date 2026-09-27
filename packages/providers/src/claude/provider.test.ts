@@ -290,10 +290,10 @@ describe('ClaudeProvider', () => {
       expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
-    test('picks the greatest-output-token model and warns when modelUsage has multiple keys', async () => {
+    test('refuses multi-model usage instead of collapsing subscription evidence', async () => {
       // A subagent pinned via `agents:` (or a fallbackModel takeover) puts more
-      // than one model in the record, and key order carries no guarantee — the
-      // main model here is deliberately NOT first.
+      // than one model in the record. Attestation must preserve that ambiguity
+      // by failing closed rather than selecting a token-count winner.
       mockQuery.mockImplementation(async function* () {
         yield {
           type: 'result',
@@ -313,18 +313,14 @@ describe('ClaudeProvider', () => {
         };
       });
 
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(chunks[0]).toMatchObject({ resolvedModel: { id: 'claude-sonnet-5' } });
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        {
-          models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5'],
-          selected: 'claude-sonnet-5',
-        },
-        'claude.resolved_model_ambiguous'
+      await expect(async () => {
+        for await (const _chunk of client.sendQuery('test', '/workspace')) {
+          // The terminal result must be refused before it can be emitted.
+        }
+      }).toThrow('Claude SDK reported multiple models for one attested turn');
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        { models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5'] },
+        'claude.resolved_model_multi_model_refused'
       );
     });
 

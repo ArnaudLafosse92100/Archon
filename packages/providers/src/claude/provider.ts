@@ -192,41 +192,26 @@ function normalizeClaudeUsage(usage?: {
 }
 
 /**
- * Pick the concrete model that did the bulk of a turn's work from the SDK's
- * per-model usage record.
+ * Return the only concrete model reported by the SDK for this turn.
  *
- * More than one entry is reachable for a single turn: a subagent pinned to
- * another model via `agents:`, or a `fallbackModel` takeover. Key insertion
- * order happens to put the main model first today, but nothing in the SDK
- * guarantees it — so select by greatest output-token count (the main model
- * produces the bulk of the output) and WARN whenever the record is ambiguous,
- * so a multi-model turn is visible instead of silently collapsed.
+ * A second entry can mean a model-pinned subagent or `fallbackModel` takeover.
+ * Subscription-route attestation must not collapse that evidence to a
+ * greatest-token "winner": doing so could certify the requested model while a
+ * different model also handled part of the turn. Fail closed instead.
  *
- * `modelUsage` is non-optional in the SDK types but arrives over an IPC
- * boundary, so the absent/empty cases stay guarded — absence yields undefined
- * and the caller omits `resolvedModel` entirely rather than inventing a value.
- * On a tie (or output counts the SDK didn't send) the first key wins, which is
- * exactly the pre-#2314 behavior — safe, and the warning still fires.
+ * `modelUsage` crosses an IPC boundary, so absent/empty records remain guarded
+ * and cause the caller to omit `resolvedModel` rather than inventing evidence.
  */
-function selectResolvedModelId(
+function requireSingleResolvedModelId(
   modelUsage: Record<string, ModelUsage> | undefined
 ): string | undefined {
   if (!modelUsage) return undefined;
   const entries = Object.entries(modelUsage);
   if (entries.length === 0) return undefined;
   if (entries.length === 1) return entries[0][0];
-
-  const outputTokensOf = (usage: ModelUsage): number =>
-    Number.isFinite(usage.outputTokens) ? usage.outputTokens : 0;
-  let selected = entries[0];
-  for (const entry of entries.slice(1)) {
-    if (outputTokensOf(entry[1]) > outputTokensOf(selected[1])) selected = entry;
-  }
-  getLog().warn(
-    { models: entries.map(([id]) => id), selected: selected[0] },
-    'claude.resolved_model_ambiguous'
-  );
-  return selected[0];
+  const models = entries.map(([id]) => id);
+  getLog().error({ models }, 'claude.resolved_model_multi_model_refused');
+  throw new Error('Claude SDK reported multiple models for one attested turn');
 }
 
 /**
@@ -1249,7 +1234,7 @@ async function* streamClaudeMessages(
       yield { type: 'rate_limit', rateLimitInfo: rateLimitMsg.rate_limit_info ?? {} };
     } else if (event.type === 'result') {
       const resultMsg = msg as SDKResultMessage;
-      const resolvedModelId = selectResolvedModelId(resultMsg.modelUsage);
+      const resolvedModelId = requireSingleResolvedModelId(resultMsg.modelUsage);
       // The terminal result resolves any recorded synthetic error message.
       const syntheticError = pendingSdkError;
       pendingSdkError = undefined;
