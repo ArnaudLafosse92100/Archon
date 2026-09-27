@@ -23,6 +23,7 @@ describe('strict Claude provider launch isolation', () => {
     const settingsDir = join(projectDir, '.claude');
     const capturePath = join(root, 'capture.jsonl');
     const fixturePath = join(root, 'claude-fixture');
+    const managedClaudeConfig = join(root, 'managed-claude-config');
     const oauthToken = 'offline-oauth-sentinel';
     const projectApiKey = 'project-api-key-must-not-win';
     const ambientRoutes: Record<string, string> = {
@@ -41,6 +42,7 @@ describe('strict Claude provider launch isolation', () => {
       Object.keys(ambientRoutes).map(key => [key, process.env[key]])
     );
     mkdirSync(settingsDir, { recursive: true });
+    mkdirSync(managedClaudeConfig, { recursive: true });
     writeFileSync(
       join(settingsDir, 'settings.json'),
       JSON.stringify({ env: { ANTHROPIC_API_KEY: projectApiKey } }),
@@ -105,7 +107,7 @@ process.exit(1);
             OPENROUTER_API_KEY: '',
             CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
             ANTHROPIC_OAUTH_TOKEN: oauthToken,
-            CLAUDE_CONFIG_DIR: join(root, 'managed-claude-config'),
+            CLAUDE_CONFIG_DIR: managedClaudeConfig,
           },
           providerLaunchAttestation: {
             version: 1,
@@ -123,7 +125,7 @@ process.exit(1);
               'CLAUDE_CONFIG_DIR',
             ],
             managedPathIdentity: 'claude-config',
-            envPolicy: 'targeted_empty_overrides',
+            envPolicy: 'strict_child_allowlist_v1',
             filesystemSettingsPolicy: 'disabled',
             executableIdentity: { status: 'deferred_to_provider' },
             billingClaim: 'unverified',
@@ -142,19 +144,19 @@ process.exit(1);
       for (const capture of captures) {
         expect(capture.args).toContain('--setting-sources=');
         expect(capture.apiKeySource).toBe('CLAUDE_CODE_OAUTH_TOKEN');
-        // Strict launches use targeted empty overrides rather than deleting the
-        // inherited keys from the subprocess environment.
-        expect(capture.anthropicApiKey).toBe('');
-        expect(capture.gatewayTokenFileDescriptor).toBe('');
-        expect(capture.anthropicAuthToken).toBe('');
-        expect(capture.anthropicBaseUrl).toBe('');
-        expect(capture.bedrock).toBe('');
-        expect(capture.vertex).toBe('');
-        expect(capture.foundry).toBe('');
-        expect(capture.openaiApiKey).toBe('');
-        expect(capture.codexApiKey).toBe('');
-        expect(capture.codexHome).toBe('');
-        expect(capture.openrouterApiKey).toBe('');
+        // Strict launches remove neutralized aliases entirely. Empty values
+        // are not retained because some CLIs branch on key presence.
+        expect(capture.anthropicApiKey).toBeNull();
+        expect(capture.gatewayTokenFileDescriptor).toBeNull();
+        expect(capture.anthropicAuthToken).toBeNull();
+        expect(capture.anthropicBaseUrl).toBeNull();
+        expect(capture.bedrock).toBeNull();
+        expect(capture.vertex).toBeNull();
+        expect(capture.foundry).toBeNull();
+        expect(capture.openaiApiKey).toBeNull();
+        expect(capture.codexApiKey).toBeNull();
+        expect(capture.codexHome).toBeNull();
+        expect(capture.openrouterApiKey).toBeNull();
         expect(capture.oauthToken).toBe(oauthToken);
         expect(JSON.stringify(capture)).not.toContain(projectApiKey);
       }

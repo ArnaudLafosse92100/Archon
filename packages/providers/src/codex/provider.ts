@@ -30,6 +30,7 @@ import {
   normalizeJsonSchemaForOpenAiStrict,
 } from '../shared/structured-output';
 import { withResumedOutcome, resumedOutcome } from '../shared/resumed';
+import { buildStrictSubscriptionEnv } from '../strict-subscription-env';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -129,7 +130,13 @@ function buildThreadOptions(
   };
 }
 
-function buildCodexEnv(requestEnv: Record<string, string>): Record<string, string> {
+function buildCodexEnv(
+  requestEnv: Record<string, string>,
+  attestation?: SendQueryOptions['providerLaunchAttestation']
+): Record<string, string> {
+  if (attestation?.provider === 'codex') {
+    return buildStrictSubscriptionEnv(attestation, requestEnv);
+  }
   const baseEnv = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
   );
@@ -138,8 +145,12 @@ function buildCodexEnv(requestEnv: Record<string, string>): Record<string, strin
 }
 
 function buildMcpEnvSource(
-  requestEnv?: Record<string, string>
+  requestEnv?: Record<string, string>,
+  attestation?: SendQueryOptions['providerLaunchAttestation']
 ): Record<string, string | undefined> {
+  if (attestation?.provider === 'codex') {
+    return buildStrictSubscriptionEnv(attestation, requestEnv);
+  }
   return requestEnv ? { ...process.env, ...requestEnv } : process.env;
 }
 
@@ -889,9 +900,14 @@ export class CodexProvider implements IAgentProvider {
   private async createCodexClient(
     configCodexBinaryPath: string | undefined,
     requestEnv?: Record<string, string>,
-    codexConfigOverrides?: CodexConfigOverrides
+    codexConfigOverrides?: CodexConfigOverrides,
+    attestation?: SendQueryOptions['providerLaunchAttestation']
   ): Promise<Codex> {
-    if ((!requestEnv || Object.keys(requestEnv).length === 0) && !codexConfigOverrides) {
+    if (
+      !attestation &&
+      (!requestEnv || Object.keys(requestEnv).length === 0) &&
+      !codexConfigOverrides
+    ) {
       return getCodex(configCodexBinaryPath);
     }
 
@@ -899,7 +915,7 @@ export class CodexProvider implements IAgentProvider {
       const codexOptions: CodexOptions = {
         codexPathOverride: await resolveCodexBinaryPath(configCodexBinaryPath),
         ...(requestEnv && Object.keys(requestEnv).length > 0
-          ? { env: buildCodexEnv(requestEnv) }
+          ? { env: buildCodexEnv(requestEnv, attestation) }
           : {}),
         ...(codexConfigOverrides ? { config: codexConfigOverrides } : {}),
       };
@@ -933,7 +949,7 @@ export class CodexProvider implements IAgentProvider {
       const { servers, serverNames, missingVars } = await loadMcpConfig(
         mcpPath,
         cwd,
-        buildMcpEnvSource(requestOptions.env)
+        buildMcpEnvSource(requestOptions.env, requestOptions.providerLaunchAttestation)
       );
       declaredMcpConfigOverrides = buildCodexMcpConfigOverrides(servers);
       getLog().info({ serverNames, mcpPath }, 'codex.mcp_config_loaded');
@@ -980,7 +996,8 @@ export class CodexProvider implements IAgentProvider {
     let codex = await this.createCodexClient(
       codexConfig.codexBinaryPath,
       requestOptions?.env,
-      initialConfigOverrides
+      initialConfigOverrides,
+      requestOptions?.providerLaunchAttestation
     );
     const threadOptions = buildThreadOptions(
       cwd,
@@ -1129,7 +1146,8 @@ export class CodexProvider implements IAgentProvider {
               codex = await this.createCodexClient(
                 codexConfig.codexBinaryPath,
                 requestOptions?.env,
-                declaredMcpConfigOverrides
+                declaredMcpConfigOverrides,
+                requestOptions?.providerLaunchAttestation
               );
               if (resumeSessionId) {
                 try {

@@ -22,7 +22,7 @@ const strictClaudeAttestation: ProviderLaunchAttestationV1 = {
   neutralizedAliases: ['ANTHROPIC_API_KEY'],
   deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN'],
   managedPathIdentity: 'claude-config',
-  envPolicy: 'targeted_empty_overrides',
+  envPolicy: 'strict_child_allowlist_v1',
   filesystemSettingsPolicy: 'disabled',
   executableIdentity: { status: 'deferred_to_provider' },
   billingClaim: 'unverified',

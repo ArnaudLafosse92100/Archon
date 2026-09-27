@@ -209,6 +209,7 @@ const CLAUDE_PROVIDER_CREDENTIAL_ENV_KEYS = [
 const CODEX_PROVIDER_CREDENTIAL_ENV_KEYS = [
   'OPENAI_API_KEY',
   'CODEX_API_KEY',
+  'OPENAI_BASE_URL',
   'CODEX_HOME',
 ] as const;
 const AMBIENT_CLOUD_CREDENTIAL_ENV_KEYS = [
@@ -231,6 +232,30 @@ const PROVIDER_SCOPED_CREDENTIAL_ENV_KEYS = [
   ...AMBIENT_CLOUD_CREDENTIAL_ENV_KEYS,
   'ARCHON_PI_AUTH_PATH',
 ] as const;
+const PROVIDER_CREDENTIAL_OR_ROUTING_PREFIXES = [
+  'ANTHROPIC_',
+  'CLAUDE_',
+  'OPENAI_',
+  'CODEX_',
+  'AWS_',
+  'GOOGLE_',
+  'CLOUDSDK_',
+  'AZURE_',
+] as const;
+const PROVIDER_CREDENTIAL_OR_ROUTING_EXACT_KEYS = new Set([
+  ...PROVIDER_SCOPED_CREDENTIAL_ENV_KEYS,
+  'AGENT_PROXY_AUTH_TOKEN',
+  'AGENT_PROXY_URL',
+  'USE_LOCAL_OAUTH',
+  'USE_STAGING_OAUTH',
+]);
+
+function isProviderCredentialOrRoutingKey(key: string): boolean {
+  return (
+    PROVIDER_CREDENTIAL_OR_ROUTING_EXACT_KEYS.has(key) ||
+    PROVIDER_CREDENTIAL_OR_ROUTING_PREFIXES.some(prefix => key.startsWith(prefix))
+  );
+}
 
 /**
  * Build the per-call environment at the last shared boundary before provider
@@ -269,14 +294,26 @@ function buildProviderScopedEnvironment(
 
   const configuredEnv = config.envVars ?? {};
   const scopedEnv: Record<string, string> = { ...configuredEnv };
-  for (const key of PROVIDER_SCOPED_CREDENTIAL_ENV_KEYS) scopedEnv[key] = '';
+  const neutralized = new Set<string>(PROVIDER_SCOPED_CREDENTIAL_ENV_KEYS);
+  for (const key of [...Object.keys(process.env), ...Object.keys(configuredEnv)]) {
+    if (isProviderCredentialOrRoutingKey(key)) neutralized.add(key);
+  }
+  for (const key of neutralized) scopedEnv[key] = '';
 
   if (provider === 'pi' && configuredEnv.OPENROUTER_API_KEY !== undefined) {
     scopedEnv.OPENROUTER_API_KEY = configuredEnv.OPENROUTER_API_KEY;
   }
-  if (preparedLaunch !== undefined) Object.assign(scopedEnv, preparedLaunch.deliveryEnv);
+  let attestedLaunch = preparedLaunch;
+  if (preparedLaunch !== undefined) {
+    Object.assign(scopedEnv, preparedLaunch.deliveryEnv);
+    for (const key of preparedLaunch.deliveredAliases) neutralized.delete(key);
+    attestedLaunch = {
+      ...preparedLaunch,
+      neutralizedAliases: [...neutralized].sort(),
+    };
+  }
 
-  return { env: scopedEnv, preparedLaunch };
+  return { env: scopedEnv, preparedLaunch: attestedLaunch };
 }
 
 /**

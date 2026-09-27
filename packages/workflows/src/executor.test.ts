@@ -3048,7 +3048,7 @@ describe('executeWorkflow', () => {
         credential: { vendor: 'anthropic', kind: 'subscription', delivery: 'environment' },
         neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
         deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
-        envPolicy: 'targeted_empty_overrides',
+        envPolicy: 'strict_child_allowlist_v1',
         filesystemSettingsPolicy: 'disabled',
       });
       const claudeConfigDir = prepared?.deliveryEnv.CLAUDE_CONFIG_DIR;

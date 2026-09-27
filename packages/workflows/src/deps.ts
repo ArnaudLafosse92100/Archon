@@ -65,7 +65,7 @@ export interface PreparedProviderLaunch {
   neutralizedAliases: readonly string[];
   deliveredAliases: readonly string[];
   managedPathIdentity?: string;
-  envPolicy: 'targeted_empty_overrides';
+  envPolicy: 'strict_child_allowlist_v1';
   filesystemSettingsPolicy?: 'disabled';
 }
 

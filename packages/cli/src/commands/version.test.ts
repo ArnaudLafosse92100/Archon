@@ -117,7 +117,7 @@ describe('versionCommand', () => {
           'workflow.provider_launch_attestation': {
             version: 1,
             evidence: 'local_launch_preparation',
-            envPolicy: 'targeted_empty_overrides',
+            envPolicy: 'strict_child_allowlist_v1',
             aliasSemantics: 'neutralized_not_absent',
             strictClaudeNeutralizedAliases: expect.arrayContaining([
               'ANTHROPIC_API_KEY',

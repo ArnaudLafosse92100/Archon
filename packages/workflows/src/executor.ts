@@ -1,11 +1,10 @@
 /**
  * Workflow Executor - runs DAG-based workflows
  */
-import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'fs/promises';
+import { mkdir, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { dirname, join } from 'path';
-import { tmpdir } from 'os';
 import {
   CLAUDE_CONFIG_RELATIVE_PATH,
   CODEX_AUTH_JSON_RELATIVE_PATH,
@@ -127,6 +126,7 @@ import type {
 } from './model-validation';
 import { assistantModelDefaults, resolveWorkflowModelScope } from './node-model-resolution';
 import { prepareManagedCodegraph } from './managed-codegraph';
+import { createStrictProviderCredentialRoots } from './provider-credential-roots';
 
 /** The per-user prefs layer as returned by `WorkflowDeps.getUserAiPrefs`. */
 type UserAiPrefsLayer = Awaited<ReturnType<NonNullable<WorkflowDeps['getUserAiPrefs']>>>;
@@ -421,10 +421,10 @@ async function resolveUserProviderEnvForWorkflow(
       provider: 'codex',
       credential: { ...codexCredential, kind: 'subscription' },
       deliveryEnv: { CODEX_HOME: privateCodexHome },
-      neutralizedAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
+      neutralizedAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL'],
       deliveredAliases: ['CODEX_HOME'],
       managedPathIdentity: CODEX_AUTH_JSON_RELATIVE_PATH,
-      envPolicy: 'targeted_empty_overrides',
+      envPolicy: 'strict_child_allowlist_v1',
     };
   }
 
@@ -473,7 +473,7 @@ async function resolveUserProviderEnvForWorkflow(
       neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
       deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
       managedPathIdentity: CLAUDE_CONFIG_RELATIVE_PATH,
-      envPolicy: 'targeted_empty_overrides',
+      envPolicy: 'strict_child_allowlist_v1',
       filesystemSettingsPolicy: 'disabled',
     };
   }
@@ -3079,18 +3079,18 @@ export async function executeWorkflow(
   ) {
     requiredSubscriptions.add('claude');
   }
-  const strictCredentialRoots: Partial<Record<StrictSubscriptionProvider, string>> = {};
+  let strictCredentialRunRoot: string | undefined;
+  let strictCredentialRoots: Partial<Record<StrictSubscriptionProvider, string>> = {};
   try {
-    if (requiredSubscriptions.has('codex')) {
-      strictCredentialRoots.codex = await mkdtemp(join(tmpdir(), 'archon-codex-credentials-'));
-    }
-    if (requiredSubscriptions.has('claude')) {
-      strictCredentialRoots.claude = await mkdtemp(join(tmpdir(), 'archon-claude-config-'));
+    if (requiredSubscriptions.size > 0) {
+      const created = await createStrictProviderCredentialRoots(requiredSubscriptions);
+      strictCredentialRunRoot = created.runRoot;
+      strictCredentialRoots = created.providers;
     }
   } catch (_error) {
-    await Promise.all(
-      Object.values(strictCredentialRoots).map(path => rm(path, { recursive: true, force: true }))
-    );
+    if (strictCredentialRunRoot) {
+      await rm(strictCredentialRunRoot, { recursive: true, force: true });
+    }
     const code = credentialPolicyErrorCodes.fileWriteFailed;
     getLog().error({ workflowRunId: workflowRun.id, code }, 'workflow.credential_policy_failed');
     await sendCriticalMessage(
@@ -3120,9 +3120,9 @@ export async function executeWorkflow(
       strictCredentialRoots
     ));
   } catch (error) {
-    await Promise.all(
-      Object.values(strictCredentialRoots).map(path => rm(path, { recursive: true, force: true }))
-    );
+    if (strictCredentialRunRoot) {
+      await rm(strictCredentialRunRoot, { recursive: true, force: true });
+    }
     const code =
       error instanceof CredentialPolicyError
         ? error.code
@@ -3588,9 +3588,9 @@ export async function executeWorkflow(
     // may throw — so it always pairs with the acquire above this try, on every
     // exit path (success, thrown error, or backstop failure).
     keepAwake.release();
-    await Promise.all(
-      Object.values(strictCredentialRoots).map(path => rm(path, { recursive: true, force: true }))
-    );
+    if (strictCredentialRunRoot) {
+      await rm(strictCredentialRunRoot, { recursive: true, force: true });
+    }
     // Defensive backstop: if the workflow run is still 'running' after all
     // normal and exceptional code paths, flip it to 'failed' to prevent zombie
     // accumulation. Guards against any future code path that exits without

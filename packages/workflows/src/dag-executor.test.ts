@@ -4217,7 +4217,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
                 'CLAUDE_CONFIG_DIR',
               ],
               managedPathIdentity: 'claude-config',
-              envPolicy: 'targeted_empty_overrides',
+              envPolicy: 'strict_child_allowlist_v1',
               filesystemSettingsPolicy: 'disabled',
             },
           },
@@ -4248,7 +4248,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
       for (const key of STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS) {
         expect(actualEnv[key]).toBe('');
       }
-      expect(options.providerLaunchAttestation).toEqual({
+      expect(options.providerLaunchAttestation).toMatchObject({
         version: 1,
         provider: 'claude',
         nodeId: 'strict-node',
@@ -4257,14 +4257,19 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
           kind: 'subscription',
           delivery: 'environment',
         },
-        neutralizedAliases: STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
         deliveredAliases: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR'],
         managedPathIdentity: 'claude-config',
-        envPolicy: 'targeted_empty_overrides',
+        envPolicy: 'strict_child_allowlist_v1',
         filesystemSettingsPolicy: 'disabled',
         executableIdentity: { status: 'deferred_to_provider' },
         billingClaim: 'unverified',
       });
+      const attestation = options.providerLaunchAttestation as {
+        neutralizedAliases: readonly string[];
+      };
+      expect(attestation.neutralizedAliases).toEqual(
+        expect.arrayContaining([...STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS])
+      );
       expect(JSON.stringify(options.providerLaunchAttestation)).not.toContain(token);
       expect(JSON.stringify(options.providerLaunchAttestation)).not.toContain('/run/claude-config');
     }
@@ -4548,7 +4553,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
               neutralizedAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
               deliveredAliases: ['CODEX_HOME'],
               managedPathIdentity: 'codex-home/auth.json',
-              envPolicy: 'targeted_empty_overrides',
+              envPolicy: 'strict_child_allowlist_v1',
             },
           },
           protectedCredentialValues: [authContents],
@@ -4647,7 +4652,7 @@ describe('executeDagWorkflow -- node-level retry for transient errors', () => {
               neutralizedAliases: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
               deliveredAliases: ['CODEX_HOME'],
               managedPathIdentity: 'codex-home/auth.json',
-              envPolicy: 'targeted_empty_overrides',
+              envPolicy: 'strict_child_allowlist_v1',
             },
           },
         },

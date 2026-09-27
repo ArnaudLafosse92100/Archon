@@ -55,6 +55,7 @@ import { buildArchonMcpServer, ARCHON_TOOL_SERVER } from './native-tools';
 import { createLogger } from '@archon/paths';
 import { loadMcpConfig } from '../mcp/config';
 import { withResumedOutcome, resumedOutcome } from '../shared/resumed';
+import { buildStrictSubscriptionEnv } from '../strict-subscription-env';
 import { clampEffort, type AssertNever } from '@archon/paths/effort';
 import {
   claudeSkillSearchRoots,
@@ -109,12 +110,16 @@ export function assertStrictClaudeLaunchEnvironment(
     throw new Error(`strict_claude_launch_invalid:${reason}`);
   };
   if (
-    attestation.envPolicy !== 'targeted_empty_overrides' ||
+    attestation.envPolicy !== 'strict_child_allowlist_v1' ||
     attestation.filesystemSettingsPolicy !== 'disabled'
   ) {
     fail('policy');
   }
-  if (!sameStringSet(attestation.neutralizedAliases, STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS)) {
+  if (
+    !STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS.every(value =>
+      attestation.neutralizedAliases.includes(value)
+    )
+  ) {
     fail('neutralized_aliases');
   }
   if (!sameStringSet(attestation.deliveredAliases, STRICT_CLAUDE_DELIVERED_ALIASES)) {
@@ -270,8 +275,14 @@ export function buildRequestSubprocessEnv(
   requestOptions: SendQueryOptions | undefined
 ): NodeJS.ProcessEnv {
   const isContainerRun = requestOptions?.execContext?.kind === 'container';
+  const attestation = requestOptions?.providerLaunchAttestation;
   const subprocessEnv = isContainerRun ? buildContainerBaseEnv() : buildSubprocessEnv();
-  const env = requestOptions?.env ? { ...subprocessEnv, ...requestOptions.env } : subprocessEnv;
+  const env =
+    attestation?.provider === 'claude'
+      ? buildStrictSubscriptionEnv(attestation, requestOptions?.env)
+      : requestOptions?.env
+        ? { ...subprocessEnv, ...requestOptions.env }
+        : subprocessEnv;
   // CLAUDE_API_KEY is Archon's variable name; the Claude Code CLI only reads
   // ANTHROPIC_API_KEY, so mirror it or solo .env installs never authenticate
   // (delivery.ts sets both vars on the per-user api_key path). Guarded on the

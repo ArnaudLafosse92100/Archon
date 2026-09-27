@@ -1670,7 +1670,7 @@ describe('ClaudeProvider', () => {
             'CLAUDE_CONFIG_DIR',
           ],
           managedPathIdentity: 'claude-config',
-          envPolicy: 'targeted_empty_overrides',
+          envPolicy: 'strict_child_allowlist_v1',
           filesystemSettingsPolicy: 'disabled',
           executableIdentity: { status: 'deferred_to_provider' },
           billingClaim: 'unverified',
@@ -1684,7 +1684,7 @@ describe('ClaudeProvider', () => {
       expect(callArgs.options.settingSources).toEqual([]);
     });
 
-    test('strict subscription launch fails closed on ambient auth and backend routes', async () => {
+    test('strict subscription launch excludes ambient auth and backend routes', async () => {
       const forbiddenRoutes = [
         'ANTHROPIC_AUTH_TOKEN',
         'ANTHROPIC_BASE_URL',
@@ -1723,7 +1723,7 @@ describe('ClaudeProvider', () => {
                   'CLAUDE_CONFIG_DIR',
                 ],
                 managedPathIdentity: 'claude-config',
-                envPolicy: 'targeted_empty_overrides',
+                envPolicy: 'strict_child_allowlist_v1',
                 filesystemSettingsPolicy: 'disabled',
                 executableIdentity: { status: 'deferred_to_provider' },
                 billingClaim: 'unverified',
@@ -1732,10 +1732,12 @@ describe('ClaudeProvider', () => {
               // consume
             }
           };
-          await expect(consume()).rejects.toThrow(
-            `strict_claude_launch_invalid:forbidden_route:${forbiddenRoute}`
-          );
-          expect(mockQuery).not.toHaveBeenCalled();
+          await expect(consume()).resolves.toBeUndefined();
+          expect(mockQuery).toHaveBeenCalledTimes(1);
+          const options = (mockQuery.mock.calls[0][0] as { options: { env: NodeJS.ProcessEnv } })
+            .options;
+          expect(options.env[forbiddenRoute]).toBeUndefined();
+          mockQuery.mockClear();
         } finally {
           if (original === undefined) delete process.env[forbiddenRoute];
           else process.env[forbiddenRoute] = original;
