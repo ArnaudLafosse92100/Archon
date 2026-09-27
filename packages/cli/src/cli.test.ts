@@ -641,6 +641,13 @@ describe('workflow run config argument', () => {
   });
 
   it('accepts only governed CodeGraph modes on workflow run', () => {
+    const parsed = parseArgs({
+      args: ['workflow', 'run', 'x', '--codegraph', 'required'],
+      options: cliArgOptions,
+      allowPositionals: true,
+      strict: true,
+    });
+    expect(parsed.values.codegraph).toBe('required');
     expect(validateCodegraphMode('workflow', 'run', 'required')).toBeUndefined();
     expect(validateCodegraphMode('workflow', 'run', 'turbo')).toContain(
       '--codegraph must be one of'
