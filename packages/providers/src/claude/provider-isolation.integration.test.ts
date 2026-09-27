@@ -59,7 +59,7 @@ if (sources.includes('project')) {
   const settings = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.claude', 'settings.json'), 'utf8'));
   Object.assign(effectiveEnv, settings.env ?? {});
 }
-fs.appendFileSync(process.env.ARCHON_CAPTURE_PATH, JSON.stringify({
+fs.appendFileSync(${JSON.stringify(capturePath)}, JSON.stringify({
   args: process.argv.slice(2),
   apiKeySource: effectiveEnv.ANTHROPIC_API_KEY
     ? 'ANTHROPIC_API_KEY'
@@ -101,7 +101,6 @@ process.exit(1);
             CODEX_API_KEY: '',
             CODEX_HOME: '',
             OPENROUTER_API_KEY: '',
-            ARCHON_CAPTURE_PATH: capturePath,
             CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
             ANTHROPIC_OAUTH_TOKEN: oauthToken,
             CLAUDE_CONFIG_DIR: join(root, 'managed-claude-config'),
