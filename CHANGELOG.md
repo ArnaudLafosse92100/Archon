@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Managed CodeGraph capability.** The `workflow run --codegraph <mode>` flag, the run-config `managedResources.codegraph.mode` key, the global `managedResources.codegraph_managed_v1` registry, its `archon doctor` check, and the `codegraph_managed_v1` entry in `archon version --json` capabilities are gone. `--codegraph` is now rejected as an unknown option, `managedResources` in a run config is rejected as an unknown run config key, and a leftover `managedResources` block in `~/.archon/config.yaml` fails config loading with an error telling you to delete it.
+
 ## [0.10.1] - 2026-08-30
 
 **This patch release contains a breaking change.** Built-in model tiers now ship for `claude` and `codex` only. If your install runs `pi`, `copilot`, or `opencode` and you have never configured `tiers:`, bundled workflows will refuse to load until you set them — read the Breaking section before upgrading. Everyone else gets a smaller review bill and four fixes.

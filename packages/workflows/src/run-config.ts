@@ -39,9 +39,6 @@ export function applyWorkflowRunConfigLayer(
     ...(workflows !== undefined ? { workflows } : {}),
     ...(layer.docsPath !== undefined ? { docsPath: layer.docsPath } : {}),
     ...(layer.envVars !== undefined ? { envVars: { ...base.envVars, ...layer.envVars } } : {}),
-    ...(layer.managedResources?.codegraph !== undefined
-      ? { managedResourceModes: { codegraph: layer.managedResources.codegraph.mode } }
-      : {}),
   };
 }
 

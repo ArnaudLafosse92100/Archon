@@ -60,25 +60,6 @@ export function rejectConfigOutsideRun(
 }
 
 /**
- * Validate the governed CodeGraph selector before workflow discovery or worktree creation.
- * The CLI accepts a mode only; executable paths and commands are never user input.
- */
-export function validateCodegraphMode(
-  command: string | undefined,
-  subcommand: string | undefined,
-  mode: unknown
-): string | undefined {
-  if (mode === undefined) return undefined;
-  if (command !== 'workflow' || subcommand !== 'run') {
-    return 'Error: --codegraph can only be used with workflow run.';
-  }
-  if (mode !== 'off' && mode !== 'optional' && mode !== 'required') {
-    return 'Error: --codegraph must be one of: off, optional, required.';
-  }
-  return undefined;
-}
-
-/**
  * Rejects a fresh --config on `workflow run --resume`: the resumed run keeps
  * the config it started with.
  */

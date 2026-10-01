@@ -1543,42 +1543,6 @@ describe('CodexProvider', () => {
       }
     });
 
-    test('translates an engine-managed MCP server into Codex config overrides', async () => {
-      mockRunStreamed.mockResolvedValue({
-        events: (async function* () {
-          yield { type: 'turn.completed', usage: defaultUsage };
-        })(),
-      });
-
-      for await (const _ of client.sendQuery('test prompt', '/workspace', undefined, {
-        nodeConfig: {
-          managedMcpServers: {
-            codegraph: {
-              command: '/managed/codegraph',
-              args: ['serve', '--mcp', '-p', '/workspace'],
-              env: { CODEGRAPH_TELEMETRY: '0' },
-            },
-          },
-        },
-      })) {
-        // consume
-      }
-
-      expect(MockCodex).toHaveBeenCalledWith(
-        expect.objectContaining({
-          config: expect.objectContaining({
-            mcp_servers: {
-              codegraph: {
-                command: '/managed/codegraph',
-                args: ['serve', '--mcp', '-p', '/workspace'],
-                env: { CODEGRAPH_TELEMETRY: '0' },
-              },
-            },
-          }),
-        })
-      );
-    });
-
     test('prefixes workflow MCP warnings for workflow forwarding', async () => {
       const testDir = await mkdtemp(join(tmpdir(), 'codex-provider-mcp-warning-'));
       delete process.env.ARCHON_CODEX_MISSING_TOKEN;

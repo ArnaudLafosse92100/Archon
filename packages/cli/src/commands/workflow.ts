@@ -349,8 +349,6 @@ export interface WorkflowRunOptions {
   modelAssignments?: string[];
   /** Local YAML file supplying a sparse configuration layer for this run. */
   configPath?: string;
-  /** Select the operator-managed CodeGraph capability; no executable input is accepted. */
-  codegraphMode?: 'off' | 'optional' | 'required';
   /** @internal Structurally validated immutable layer transferred from a detached parent. */
   detachedRunConfig?: WorkflowRunConfigInput;
   /**
@@ -1558,13 +1556,10 @@ async function runWorkflowWithOwnedSource(
       ? options.configPath
       : join(cwd, options.configPath)
     : undefined;
-  if (
-    isContinuation &&
-    (resolvedRunConfigPath || options.detachedRunConfig || options.codegraphMode)
-  ) {
+  if (isContinuation && (resolvedRunConfigPath || options.detachedRunConfig)) {
     throw new Error(RESUME_RUN_CONFIG_CONFLICT);
   }
-  let runConfig = options.detachedRunConfig
+  const runConfig = options.detachedRunConfig
     ? {
         ...options.detachedRunConfig,
         layer: normalizeRunConfigSemantics(options.detachedRunConfig.layer),
@@ -1572,15 +1567,6 @@ async function runWorkflowWithOwnedSource(
     : resolvedRunConfigPath
       ? await loadWorkflowRunConfigFile(resolvedRunConfigPath)
       : undefined;
-  if (options.codegraphMode) {
-    runConfig = {
-      layer: {
-        ...(runConfig?.layer ?? {}),
-        managedResources: { codegraph: { mode: options.codegraphMode } },
-      },
-      source: runConfig?.source ?? { kind: 'cli', label: '--codegraph' },
-    };
-  }
 
   // The row a detached parent created before forking (#2872). Loaded up front because
   // it decides the run's identity: the capture is filed under its id, the signal

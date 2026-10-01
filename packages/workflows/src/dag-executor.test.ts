@@ -1943,70 +1943,7 @@ describe('executeDagWorkflow -- tool restrictions', () => {
     expect(nodeConfig?.allowed_tools).toEqual(['Read', 'Grep']);
   });
 
-  it('injects the attested CodeGraph server only for an MCP-capable provider', async () => {
-    await executeDagWorkflow(
-      dagOptions({
-        deps: createMockDeps(),
-        cwd: testDir,
-        workflowRun: makeWorkflowRun(),
-        config: {
-          ...minimalConfig,
-          preparedCodegraph: {
-            mode: 'optional',
-            root: testDir,
-            command: '/managed/codegraph',
-            args: ['serve', '--mcp', '-p', testDir],
-            env: { CODEGRAPH_TELEMETRY: '0' },
-            version: '1.5.0',
-          },
-        },
-        workflow: {
-          name: 'managed-codegraph-claude',
-          nodes: [{ id: 'review', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } }],
-        },
-      })
-    );
-
-    const options = mockSendQueryDag.mock.calls[0]?.[3] as SendQueryOptions;
-    expect(options.nodeConfig?.managedMcpServers?.codegraph).toEqual({
-      command: '/managed/codegraph',
-      args: ['serve', '--mcp', '-p', testDir],
-      env: { CODEGRAPH_TELEMETRY: '0' },
-    });
-  });
-
-  it('fails required CodeGraph before any provider call when a Pi node cannot receive MCP', async () => {
-    await expect(
-      executeDagWorkflow(
-        dagOptions({
-          deps: createMockDeps(),
-          cwd: testDir,
-          workflowRun: makeWorkflowRun(),
-          workflowProvider: 'pi',
-          config: {
-            ...minimalConfig,
-            assistant: 'pi',
-            assistants: { ...minimalConfig.assistants, pi: {} },
-            preparedCodegraph: {
-              mode: 'required',
-              root: testDir,
-              command: '/managed/codegraph',
-              args: ['serve', '--mcp', '-p', testDir],
-              env: {},
-              version: '1.5.0',
-            },
-          },
-          workflow: {
-            name: 'managed-codegraph-pi-required',
-            nodes: [{ id: 'build', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } }],
-          },
-        })
-      )
-    ).rejects.toThrow("provider 'pi' does not support MCP");
-    expect(mockSendQueryDag).not.toHaveBeenCalled();
-  });
-
-  it('resolves a workflow alias before required CodeGraph provider preflight', async () => {
+  it('resolves a workflow alias before the container provider preflight', async () => {
     const workflowPreset = { provider: 'pi', model: 'glm-5.3' } as const;
     await expect(
       executeDagWorkflow(
@@ -2014,170 +1951,22 @@ describe('executeDagWorkflow -- tool restrictions', () => {
           deps: createMockDeps(),
           cwd: testDir,
           workflowRun: makeWorkflowRun(),
+          execContext: { kind: 'container', containerId: 'alias-preflight-container' },
           // The unresolved/default provider is Claude; the workflow model alias
           // is the authority that changes the inherited provider to Pi.
           workflowProvider: 'claude',
           workflowModel: 'glm-5.3',
           workflowPreset,
           aiProfile: buildAiProfile('claude'),
-          config: {
-            ...minimalConfig,
-            preparedCodegraph: {
-              mode: 'required',
-              root: testDir,
-              command: '/managed/codegraph',
-              args: ['serve', '--mcp', '-p', testDir],
-              env: {},
-              version: '1.5.0',
-            },
-          },
           workflow: {
-            name: 'managed-codegraph-workflow-alias-required',
+            name: 'container-workflow-alias-preflight',
             model: 'glm-worker',
             nodes: [{ id: 'build', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } }],
           },
         })
       )
-    ).rejects.toThrow("provider 'pi' does not support MCP");
+    ).rejects.toThrow("Provider 'pi' cannot run inside a container");
     expect(mockSendQueryDag).not.toHaveBeenCalled();
-  });
-
-  it('fails required CodeGraph before provider execution in a container', async () => {
-    await expect(
-      executeDagWorkflow(
-        dagOptions({
-          deps: createMockDeps(),
-          cwd: testDir,
-          workflowRun: makeWorkflowRun(),
-          execContext: { kind: 'container', containerId: 'managed-codegraph-container' },
-          config: {
-            ...minimalConfig,
-            preparedCodegraph: {
-              mode: 'required',
-              root: testDir,
-              command: '/managed/codegraph',
-              args: ['serve', '--mcp', '-p', testDir],
-              env: {},
-              version: '1.5.0',
-            },
-          },
-          workflow: {
-            name: 'managed-codegraph-container-required',
-            nodes: [{ id: 'build', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } }],
-          },
-        })
-      )
-    ).rejects.toThrow('managed MCP is unavailable in container execution');
-    expect(mockSendQueryDag).not.toHaveBeenCalled();
-  });
-
-  it('omits optional CodeGraph observably for container execution', async () => {
-    const platform = createMockPlatform();
-    await executeDagWorkflow(
-      dagOptions({
-        deps: createMockDeps(),
-        platform,
-        cwd: testDir,
-        workflowRun: makeWorkflowRun(),
-        execContext: { kind: 'container', containerId: 'managed-codegraph-container' },
-        config: {
-          ...minimalConfig,
-          preparedCodegraph: {
-            mode: 'optional',
-            root: testDir,
-            command: '/managed/codegraph',
-            args: ['serve', '--mcp', '-p', testDir],
-            env: {},
-            version: '1.5.0',
-          },
-        },
-        workflow: {
-          name: 'managed-codegraph-container-optional',
-          nodes: [{ id: 'build', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } }],
-        },
-      })
-    );
-    const options = mockSendQueryDag.mock.calls[0]?.[3] as SendQueryOptions;
-    expect(options.nodeConfig?.managedMcpServers).toBeUndefined();
-    expect(deliveredMessages(platform)).toContain(
-      'Warning: This workflow runs in a container, which cannot receive the optional host CodeGraph MCP capability; continuing without CodeGraph.'
-    );
-  });
-
-  it('rejects a later node reserved MCP collision before provider 1', async () => {
-    await writeFile(
-      join(testDir, 'collision-mcp.json'),
-      JSON.stringify({ mcpServers: { codegraph: { command: '/user/codegraph' } } })
-    );
-    await expect(
-      executeDagWorkflow(
-        dagOptions({
-          deps: createMockDeps(),
-          cwd: testDir,
-          workflowRun: makeWorkflowRun(),
-          config: {
-            ...minimalConfig,
-            preparedCodegraph: {
-              mode: 'required',
-              root: testDir,
-              command: '/managed/codegraph',
-              args: ['serve', '--mcp', '-p', testDir],
-              env: {},
-              version: '1.5.0',
-            },
-          },
-          workflow: {
-            name: 'managed-codegraph-late-collision',
-            nodes: [
-              { id: 'first', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } },
-              {
-                id: 'later',
-                kind: 'agent',
-                source: { kind: 'command', name: 'my-cmd' },
-                depends_on: ['first'],
-                mcp: 'collision-mcp.json',
-              },
-            ],
-          },
-        })
-      )
-    ).rejects.toThrow('conflicts with node MCP configuration on node: later');
-    expect(mockSendQueryDag).not.toHaveBeenCalled();
-  });
-
-  it('continues observably without CodeGraph for optional Pi/GLM nodes', async () => {
-    const platform = createMockPlatform();
-    await executeDagWorkflow(
-      dagOptions({
-        deps: createMockDeps(),
-        platform,
-        cwd: testDir,
-        workflowRun: makeWorkflowRun(),
-        workflowProvider: 'pi',
-        config: {
-          ...minimalConfig,
-          assistant: 'pi',
-          assistants: { ...minimalConfig.assistants, pi: {} },
-          preparedCodegraph: {
-            mode: 'optional',
-            root: testDir,
-            command: '/managed/codegraph',
-            args: ['serve', '--mcp', '-p', testDir],
-            env: {},
-            version: '1.5.0',
-          },
-        },
-        workflow: {
-          name: 'managed-codegraph-pi-optional',
-          nodes: [{ id: 'build', kind: 'agent', source: { kind: 'command', name: 'my-cmd' } }],
-        },
-      })
-    );
-    const options = mockSendQueryDag.mock.calls[0]?.[3] as SendQueryOptions;
-    expect(options.nodeConfig?.managedMcpServers).toBeUndefined();
-    expect(
-      deliveredMessages(platform).some(message => message.includes('continuing without CodeGraph'))
-    ).toBeTrue();
   });
 
   it('passes settingSources to sendQuery nodeConfig for Claude node', async () => {

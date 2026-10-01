@@ -52,65 +52,9 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 export interface CheckResult {
-  id?: string;
   label: string;
   status: 'pass' | 'fail' | 'skip';
   message: string;
-  details?: Record<string, unknown>;
-  configured?: boolean;
-  ready?: boolean;
-  schemaVersion?: number;
-  protocol?: string;
-  expectedVersion?: string;
-  contractSha256?: string;
-}
-
-/** Non-mutating managed-resource probe. It validates registry bytes but never runs the adapter. */
-export async function checkCodegraphManagedResource(): Promise<CheckResult> {
-  try {
-    const [{ loadGlobalConfig }, { inspectCodegraphManagedRegistry }] = await Promise.all([
-      import('@archon/core/config'),
-      import('@archon/workflows/managed-codegraph-registry'),
-    ]);
-    const global = await loadGlobalConfig(true);
-    const inspection = await inspectCodegraphManagedRegistry(
-      global.managedResources?.codegraph_managed_v1
-    );
-    if (!inspection.configured) {
-      return {
-        id: 'codegraph_managed_v1',
-        label: 'Managed CodeGraph',
-        status: 'skip',
-        message: 'not configured (default off)',
-        configured: false,
-        ready: false,
-        details: { configured: false, ready: false },
-      };
-    }
-    return {
-      id: 'codegraph_managed_v1',
-      label: 'Managed CodeGraph',
-      status: 'pass',
-      message: `registry ready (CodeGraph ${inspection.expectedVersion})`,
-      configured: true,
-      ready: true,
-      schemaVersion: inspection.schemaVersion,
-      protocol: inspection.protocol,
-      expectedVersion: inspection.expectedVersion,
-      contractSha256: inspection.contractSha256,
-      details: { ...inspection },
-    };
-  } catch (error) {
-    return {
-      id: 'codegraph_managed_v1',
-      label: 'Managed CodeGraph',
-      status: 'fail',
-      message: (error as Error).message,
-      configured: true,
-      ready: false,
-      details: { configured: true, ready: false },
-    };
-  }
 }
 
 export interface ClaudeBinaryDeps {
@@ -812,7 +756,6 @@ export async function doctorCommand(
         checkConnectedProviders(env),
         checkWorkspaceWritable(),
         checkBundledDefaults(),
-        checkCodegraphManagedResource(),
         checkTelemetry(),
         checkSlack(env),
         checkTelegram(env),

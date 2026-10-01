@@ -3017,37 +3017,6 @@ describe('sendQuery decomposition behaviors', () => {
       expect(options.allowedTools).toContain('mcp__declared__*');
     });
 
-    test('translates an engine-managed MCP server into strict Claude SDK options', async () => {
-      mockQuery.mockImplementation(async function* () {
-        yield { type: 'result', session_id: 'sid' };
-      });
-
-      for await (const _ of client.sendQuery('test', workflowCwd, undefined, {
-        nodeConfig: {
-          nodeId: 'managed-mcp-node',
-          managedMcpServers: {
-            codegraph: {
-              command: '/managed/codegraph',
-              args: ['serve', '--mcp', '-p', workflowCwd],
-              env: { CODEGRAPH_TELEMETRY: '0' },
-            },
-          },
-        },
-      })) {
-        // consume
-      }
-
-      const options = (mockQuery.mock.calls[0][0] as { options: Record<string, unknown> }).options;
-      expect(options.mcpServers).toEqual({
-        codegraph: {
-          command: '/managed/codegraph',
-          args: ['serve', '--mcp', '-p', workflowCwd],
-          env: { CODEGRAPH_TELEMETRY: '0' },
-        },
-      });
-      expect(options.allowedTools).toContain('mcp__codegraph__*');
-    });
-
     test('keeps partial non-workflow nodeConfig on ambient defaults', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };

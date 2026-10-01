@@ -25,7 +25,6 @@ import {
   workflowRunContinuationConfigSchema,
   type WorkflowRunConfigLayer,
 } from '@archon/workflows/schemas/run-config';
-import type { ManagedResourcesGlobal } from '@archon/workflows/schemas/managed-resources';
 
 export type {
   ClaudeProviderDefaults,
@@ -111,8 +110,6 @@ export interface ContainerConfig {
 }
 
 export interface GlobalConfig {
-  /** Operator-owned executable registry. Repository config cannot override it. */
-  managedResources?: ManagedResourcesGlobal;
   /**
    * Bot display name (shown in messages)
    * @default 'Archon'
@@ -372,8 +369,6 @@ export interface MergedConfig {
   botName: string;
   assistant: string;
   assistants: AssistantDefaults;
-  /** Operator-owned executable registry; intentionally excluded from SafeConfig. */
-  managedResources?: ManagedResourcesGlobal;
   /**
    * Merged aliases (repo > global). Used by buildAiProfile at execution time.
    * Undefined when no aliases are configured anywhere.

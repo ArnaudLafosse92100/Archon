@@ -490,6 +490,16 @@ streaming:
       await expect(loadConfig()).rejects.toThrow(/not a registered provider/);
     });
 
+    test('rejects the removed managedResources registry in global config', async () => {
+      mockFsReadFile.mockResolvedValue(
+        'managedResources:\n  codegraph_managed_v1:\n    schemaVersion: 1\n'
+      );
+
+      await expect(loadConfig()).rejects.toThrow(
+        /managedResources in global config .* no longer supported.*codegraph_managed_v1/
+      );
+    });
+
     test('throws on unknown assistant in repo config', async () => {
       mockFsReadFile.mockImplementation(async (path: string) => {
         const normalized = path.replace(/\\/g, '/');

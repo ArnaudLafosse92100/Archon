@@ -47,7 +47,6 @@ import {
   rejectConfigOnContinue,
   rejectConfigOutsideRun,
   rejectModelOnContinue,
-  validateCodegraphMode,
   isContinueSubcommand,
   RESUME_RUN_CONFIG_CONFLICT,
 } from './dispatch-guards';
@@ -592,11 +591,6 @@ const orderedFlags: FlagHelp[] = [
     owners: [{ command: 'workflow', subcommand: 'run' }],
   },
   {
-    spec: '--codegraph <mode>',
-    description: 'Attach managed CodeGraph to this run: off, optional, or required',
-    owners: [{ command: 'workflow', subcommand: 'run' }],
-  },
-  {
     spec: '--resume',
     description:
       'Resume the most recent failed or paused run of the workflow (mutually exclusive with --branch)',
@@ -1110,8 +1104,6 @@ async function main(): Promise<number> {
       console.error(configOutsideRun);
       return 1;
     }
-    const codegraphError = validateCodegraphMode(command, subcommand, values.codegraph);
-    if (codegraphError) return await fail(jsonFlag, codegraphError);
     // `archon continue` was removed (#2846). Intercepted before the git gate so
     // stale invocations get the replacement pointer in any directory.
     if (command === 'continue') {
@@ -1488,7 +1480,6 @@ async function main(): Promise<number> {
               modelAssignments: values.model as string[] | undefined,
               configPath:
                 typeof values.config === 'string' ? resolve(cwd, values.config) : undefined,
-              codegraphMode: values.codegraph as 'off' | 'optional' | 'required' | undefined,
               detachedRunConfig,
               detachedRunId: values['internal-detached-run-id'] as string | undefined,
             };

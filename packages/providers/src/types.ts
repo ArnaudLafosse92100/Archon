@@ -612,13 +612,6 @@ export interface NativeTool {
   handler: (input: Record<string, unknown>) => Promise<string>;
 }
 
-/** Engine-injected stdio MCP server. Never sourced from workflow YAML. */
-export interface ManagedMcpServerConfig {
-  command: string;
-  args: readonly string[];
-  env: Record<string, string>;
-}
-
 /**
  * Raw node configuration from workflow YAML.
  * Providers translate fields they understand; unknown fields are ignored.
@@ -627,8 +620,6 @@ export interface NodeConfig {
   /** Node ID from the workflow DAG — used by providers for per-node isolation (e.g., session dirs). */
   nodeId?: string;
   mcp?: string;
-  /** Runtime-only operator-managed MCP servers, injected after attestation. */
-  managedMcpServers?: Record<string, ManagedMcpServerConfig>;
   hooks?: unknown;
   skills?: string[];
   /**

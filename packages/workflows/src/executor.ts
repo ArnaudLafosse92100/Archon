@@ -125,7 +125,6 @@ import type {
   RunModelOverrides,
 } from './model-validation';
 import { assistantModelDefaults, resolveWorkflowModelScope } from './node-model-resolution';
-import { prepareManagedCodegraph } from './managed-codegraph';
 import { createStrictProviderCredentialRoots } from './provider-credential-roots';
 
 /** The per-user prefs layer as returned by `WorkflowDeps.getUserAiPrefs`. */
@@ -2147,43 +2146,6 @@ export async function executeWorkflow(
   const protectedEnvKeys = new Set([...Object.keys(botGitHubEnv), ...Object.keys(userGitHubEnv)]);
   if (protectedEnvKeys.size > 0) {
     config.protectedEnvKeys = [...protectedEnvKeys];
-  }
-
-  const codegraphMode = config.managedResourceModes?.codegraph ?? 'off';
-  try {
-    const codegraph = await prepareManagedCodegraph(
-      cwd,
-      codegraphMode,
-      config.managedResources?.codegraph_managed_v1
-    );
-    if (codegraph.prepared) {
-      config.preparedCodegraph = codegraph.prepared;
-      getLog().info(
-        { root: codegraph.prepared.root, version: codegraph.prepared.version, mode: codegraphMode },
-        'workflow.codegraph_prepared'
-      );
-    } else if (codegraph.fallbackReason) {
-      getLog().warn(
-        { reason: codegraph.fallbackReason, mode: codegraphMode },
-        'workflow.codegraph_optional_fallback'
-      );
-      await safeSendMessage(
-        platform,
-        conversationId,
-        `Warning: CodeGraph is unavailable for this run; continuing without it (${codegraph.fallbackReason}).`
-      );
-    }
-  } catch (error) {
-    if (preCreatedRun) {
-      await requireTerminalStatusWrite(
-        deps.store.failWorkflowRun(preCreatedRun.id, (error as Error).message),
-        {
-          workflowRunId: preCreatedRun.id,
-          site: 'workflow.codegraph_preflight_fail_db_record_failed',
-        }
-      );
-    }
-    throw error;
   }
   const configuredCommandFolder = config.commands.folder;
 

@@ -26,7 +26,6 @@ import type {
   WorkflowRunConfigMetadata,
   WorkflowRunConfigSource,
 } from './schemas/run-config';
-import type { CodegraphManagedMode, ManagedResourcesGlobal } from './schemas/managed-resources';
 
 export const CODEX_AUTH_JSON_RELATIVE_PATH = 'codex-home/auth.json';
 export const CLAUDE_CONFIG_RELATIVE_PATH = 'claude-config';
@@ -150,19 +149,6 @@ export interface WorkflowConfig {
   protectedCredentialValues?: readonly string[];
   /** Runtime-only strict subscription deliveries; never persisted in run metadata/events. */
   preparedProviderLaunches?: Partial<Record<StrictSubscriptionProvider, PreparedProviderLaunch>>;
-  /** Operator-owned registry. It is never accepted from repo/workflow configuration. */
-  managedResources?: ManagedResourcesGlobal;
-  /** Run-owned capability selection; defaults to off and contains no executable input. */
-  managedResourceModes?: { codegraph: CodegraphManagedMode };
-  /** Runtime-only, attested CodeGraph MCP launch data. Never persisted. */
-  preparedCodegraph?: {
-    mode: Exclude<CodegraphManagedMode, 'off'>;
-    root: string;
-    command: string;
-    args: readonly string[];
-    env: Record<string, string>;
-    version: string;
-  };
   aliases?: RawAliasesConfig;
   tiers?: RawTiersConfig;
   commands: { folder?: string };

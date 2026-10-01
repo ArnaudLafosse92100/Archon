@@ -42,7 +42,6 @@ import {
   STRICT_CLAUDE_ROUTING_AUTH_ENV_KEYS,
   mergeTokenUsage,
 } from '@archon/providers/types';
-import { loadMcpConfig } from '@archon/providers/mcp/config';
 import type { ContainerRunContext } from './container-context';
 import { WRITEBACK_GATE_NODE_ID } from './container-context';
 import {
@@ -1883,22 +1882,6 @@ async function resolveNodeProviderAndModel(
   // Get provider capabilities for capability warnings (static lookup, no instantiation)
   const caps = getProviderCapabilities(provider);
 
-  const preparedCodegraph = config.preparedCodegraph;
-  if (preparedCodegraph && !caps.mcp) {
-    if (preparedCodegraph.mode === 'required') {
-      throw new Error(
-        `Node '${node.id}': CodeGraph is required but provider '${provider}' does not support MCP.`
-      );
-    }
-    getLog().warn({ nodeId: node.id, provider }, 'dag.codegraph_optional_provider_fallback');
-    await safeSendMessage(
-      platform,
-      conversationId,
-      `Warning: Node '${node.id}' uses provider '${provider}', which cannot receive the optional CodeGraph MCP capability; continuing without CodeGraph.`,
-      { workflowId: workflowRunId, nodeName: node.id }
-    );
-  }
-
   // `webSearchMode:` is Codex's alone — no other provider reads it, and #2556
   // decided it keeps no node-level form, making it the single workflow-level
   // field with no per-node counterpart. There is deliberately no
@@ -2044,17 +2027,6 @@ async function resolveNodeProviderAndModel(
   const nodeConfig: NodeConfig = {
     nodeId: node.id,
     mcp: node.mcp,
-    ...(preparedCodegraph && caps.mcp
-      ? {
-          managedMcpServers: {
-            codegraph: {
-              command: preparedCodegraph.command,
-              args: preparedCodegraph.args,
-              env: preparedCodegraph.env,
-            },
-          },
-        }
-      : {}),
     hooks: node.hooks,
     skills: node.skills,
     agents,
@@ -2323,9 +2295,6 @@ async function executeNodeInternal(
       : {};
 
   const configuredMcpNames = await loadConfiguredMcpServerNames(node.mcp, cwd);
-  for (const name of Object.keys(nodeOptions?.nodeConfig?.managedMcpServers ?? {})) {
-    configuredMcpNames.add(name);
-  }
 
   const lifecycleIdentity = createNodeLifecycleIdentity(node.id, true);
   const authContext = await persistAiNodeAuthContext({
@@ -11773,26 +11742,10 @@ export function collectContainerIncompatibleProviders(
   aiProfile?: ResolvedAiProfile,
   resolution?: ProviderPreflightResolution
 ): Set<string> {
-  return collectIncompatibleProviders(
-    nodes,
-    workflowProvider,
-    aiProfile,
-    capabilities => capabilities.containerExec,
-    resolution
-  );
-}
-
-function collectIncompatibleProviders(
-  nodes: readonly DagNode[],
-  workflowProvider: string,
-  aiProfile: ResolvedAiProfile | undefined,
-  supports: (capabilities: ProviderCapabilities) => boolean,
-  resolution?: ProviderPreflightResolution
-): Set<string> {
   const incompatible = new Set<string>();
   const check = (provider: string): void => {
     if (!isRegisteredProvider(provider)) return;
-    if (!supports(getProviderCapabilities(provider))) incompatible.add(provider);
+    if (!getProviderCapabilities(provider).containerExec) incompatible.add(provider);
   };
   const visit = (ns: readonly (DagNode | IncludeDirective)[]): void => {
     for (const node of ns) {
@@ -11814,41 +11767,6 @@ function collectIncompatibleProviders(
   };
   visit(nodes);
   return incompatible;
-}
-
-/** Collect AI-node providers that cannot receive the managed CodeGraph MCP server. */
-function collectMcpIncompatibleProviders(
-  nodes: readonly DagNode[],
-  workflowProvider: string,
-  aiProfile?: ResolvedAiProfile,
-  resolution?: ProviderPreflightResolution
-): Set<string> {
-  return collectIncompatibleProviders(
-    nodes,
-    workflowProvider,
-    aiProfile,
-    capabilities => capabilities.mcp,
-    resolution
-  );
-}
-
-async function collectReservedCodegraphMcpNodes(
-  nodes: readonly (DagNode | IncludeDirective)[],
-  cwd: string
-): Promise<string[]> {
-  const collisions: string[] = [];
-  const visit = async (entries: readonly (DagNode | IncludeDirective)[]): Promise<void> => {
-    for (const node of entries) {
-      if (isIncludeDirective(node)) continue;
-      if (node.mcp) {
-        const { serverNames } = await loadMcpConfig(node.mcp, cwd);
-        if (serverNames.includes('codegraph')) collisions.push(node.id);
-      }
-      if (isLoopGroupNode(node)) await visit(node.loop_group.nodes);
-    }
-  };
-  await visit(nodes);
-  return collisions;
 }
 
 /**
@@ -12313,55 +12231,6 @@ export async function executeDagWorkflow(
     workflowEffort: workflow.effort,
     config,
   };
-  let executionConfig = config;
-
-  // The governed server is a host process. A containerized Claude turn cannot
-  // reach that stdio transport, even though Claude supports MCP on the host.
-  if (config.preparedCodegraph && execContext.kind === 'container') {
-    if (config.preparedCodegraph.mode === 'required') {
-      throw new Error(
-        'CodeGraph is required but managed MCP is unavailable in container execution.'
-      );
-    }
-    getLog().warn({ workflowRunId: workflowRun.id }, 'dag.codegraph_optional_container_fallback');
-    await safeSendMessage(
-      platform,
-      conversationId,
-      'Warning: This workflow runs in a container, which cannot receive the optional host CodeGraph MCP capability; continuing without CodeGraph.',
-      { workflowId: workflowRun.id }
-    );
-    executionConfig = { ...config, preparedCodegraph: undefined };
-  }
-
-  // `codegraph` is reserved by the managed capability. Resolve every declared
-  // MCP file before provider 1 so a collision in a late node cannot burn tokens
-  // before the provider translator rejects it.
-  if (executionConfig.preparedCodegraph) {
-    const collisions = await collectReservedCodegraphMcpNodes(workflow.nodes, cwd);
-    if (collisions.length > 0) {
-      throw new Error(
-        `Managed MCP server 'codegraph' conflicts with node MCP configuration on node${collisions.length === 1 ? '' : 's'}: ${collisions.join(', ')}.`
-      );
-    }
-  }
-
-  // A required managed capability is a run-level promise. Validate the whole DAG
-  // before the first node/provider so a late Pi/GLM node cannot fail after earlier spend.
-  if (config.preparedCodegraph?.mode === 'required') {
-    const incompatible = collectMcpIncompatibleProviders(
-      workflow.nodes,
-      workflowProvider,
-      aiProfile,
-      providerPreflightResolution
-    );
-    if (incompatible.size > 0) {
-      const list = [...incompatible].sort().join(', ');
-      throw new Error(
-        `CodeGraph is required but provider${incompatible.size === 1 ? '' : 's'} '${list}' ` +
-          `${incompatible.size === 1 ? 'does' : 'do'} not support MCP.`
-      );
-    }
-  }
 
   // Container capability fail-fast: before ANY node runs (and before any
   // container work), reject a container run whose AI nodes resolve to a provider
@@ -12565,7 +12434,7 @@ export async function executeDagWorkflow(
     workflowRun,
     workflowName: workflow.name,
     workflowSourceRoots: workflowSourceRoots ?? liveSourceRoots(cwd),
-    config: executionConfig,
+    config,
     workflowProvider,
     workflowModel,
     workflowLevelOptions,

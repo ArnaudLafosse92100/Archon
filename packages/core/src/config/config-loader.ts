@@ -514,6 +514,17 @@ function applyEnvOverrides(
  * Merge global config into defaults
  */
 function mergeGlobalConfig(defaults: MergedConfig, global: GlobalConfig): MergedConfig {
+  // The managed CodeGraph capability (`managedResources.codegraph_managed_v1`) was
+  // removed. Fail loudly rather than silently ignore an operator registry that
+  // no longer does anything.
+  if ('managedResources' in global) {
+    throw new Error(
+      'managedResources in global config (~/.archon/config.yaml) is no longer supported: ' +
+        'the managed CodeGraph capability (codegraph_managed_v1) was removed. ' +
+        'Delete the managedResources block.'
+    );
+  }
+
   const result: MergedConfig = {
     ...defaults,
     assistants: mergeAssistantDefaults(defaults.assistants),
@@ -561,10 +572,6 @@ function mergeGlobalConfig(defaults: MergedConfig, global: GlobalConfig): Merged
 
   if (global.workflows) {
     result.workflows = { ...result.workflows, ...global.workflows };
-  }
-
-  if (global.managedResources) {
-    result.managedResources = global.managedResources;
   }
 
   // Container backend defaults (folder projects)
